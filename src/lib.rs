@@ -1,6 +1,6 @@
 mod config;
+mod db;
 mod encoder;
-mod item_db;
 mod ui;
 
 use std::ffi::c_char;
@@ -21,7 +21,6 @@ nexus::export! {
 
 fn load() {
     load_user_config();
-    item_db::load_item_db();
 
     register_keybind_with_string(
         "CLG_TOGGLE",

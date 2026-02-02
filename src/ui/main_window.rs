@@ -6,7 +6,8 @@ use parking_lot::Mutex;
 
 use crate::config::RUNTIME_CONFIG;
 use crate::encoder::{self, LinkType};
-use crate::item_db::{self, DbStatus, ItemFilter, UpgradeFilter};
+use crate::db::{self, DbStatus};
+use crate::db::items::{ItemFilter, UpgradeFilter};
 
 const BATCH_COLORS: &[[f32; 4]] = &[
     [0.60, 0.40, 0.80, 1.0],
@@ -21,7 +22,7 @@ const BATCH_COLORS: &[[f32; 4]] = &[
     [0.80, 0.40, 0.70, 1.0],
 ];
 
-const MAX_SEARCH_RESULTS: usize = 50;
+const RESULTS_PER_PAGE: usize = 20;
 
 // --- Batch state ---
 
@@ -58,14 +59,17 @@ struct ItemFields {
     item_search: String,
     item_filter: usize,
     item_results: Vec<(u32, String)>,
+    item_page: usize,
 
     upgrade1_search: String,
     upgrade1_filter: usize,
     upgrade1_results: Vec<(u32, String)>,
+    upgrade1_page: usize,
 
     upgrade2_search: String,
     upgrade2_filter: usize,
     upgrade2_results: Vec<(u32, String)>,
+    upgrade2_page: usize,
 }
 
 impl Default for ItemFields {
@@ -83,39 +87,72 @@ impl Default for ItemFields {
             item_search: String::new(),
             item_filter: 0,
             item_results: Vec::new(),
+            item_page: 0,
             upgrade1_search: String::new(),
             upgrade1_filter: 0,
             upgrade1_results: Vec::new(),
+            upgrade1_page: 0,
             upgrade2_search: String::new(),
             upgrade2_filter: 0,
             upgrade2_results: Vec::new(),
+            upgrade2_page: 0,
         }
     }
 }
 
-struct SingleFields {
+/// Searchable fields for non-item types (Skill, Trait, Recipe, Skin, Outfit, Map/POI).
+struct SearchableFields {
     id: i32,
     result: String,
+    search: String,
+    filter_index: usize,
+    search_results: Vec<(u32, String)>,
+    page: usize,
 }
 
-impl Default for SingleFields {
+impl Default for SearchableFields {
     fn default() -> Self {
         Self {
             id: 1,
             result: String::new(),
+            search: String::new(),
+            filter_index: 0,
+            search_results: Vec::new(),
+            page: 0,
         }
     }
 }
 
-#[derive(Default)]
 struct IndividualState {
     selected_type: usize,
+    prev_selected_type: usize,
     item_fields: ItemFields,
-    single_fields: SingleFields,
+    // One SearchableFields per link type, indexed by LinkType position
+    // Index 0=Item (unused here), 1=Map, 2=Skill, 3=Trait, 4=Recipe, 5=Wardrobe, 6=Outfit
+    searchable: [SearchableFields; 7],
+}
+
+impl IndividualState {
+    fn new() -> Self {
+        Self {
+            selected_type: 0,
+            prev_selected_type: 0,
+            item_fields: ItemFields::default(),
+            searchable: [
+                SearchableFields::default(),
+                SearchableFields::default(),
+                SearchableFields::default(),
+                SearchableFields::default(),
+                SearchableFields::default(),
+                SearchableFields::default(),
+                SearchableFields::default(),
+            ],
+        }
+    }
 }
 
 static INDIVIDUAL_STATE: Lazy<Mutex<IndividualState>> =
-    Lazy::new(|| Mutex::new(IndividualState::default()));
+    Lazy::new(|| Mutex::new(IndividualState::new()));
 
 // --- Batch helpers ---
 
@@ -323,70 +360,187 @@ fn render_batch_tab(ui: &Ui) {
 }
 
 fn render_individual_tab(ui: &Ui) {
-    // DB status bar
-    render_db_status(ui);
-    ui.separator();
-
     let mut state = INDIVIDUAL_STATE.lock();
 
     let type_names: Vec<&str> = LinkType::ALL.iter().map(|t| t.name()).collect();
 
     ui.set_next_item_width(180.0);
+    let prev = state.prev_selected_type;
     ui.combo("Type##individual", &mut state.selected_type, &type_names, |name| Cow::Borrowed(name));
-
-    ui.separator();
 
     let link_type = LinkType::ALL[state.selected_type];
 
+    // Lazy load trigger on type change
+    if state.selected_type != prev {
+        state.prev_selected_type = state.selected_type;
+        db::ensure_loaded(link_type);
+    }
+
+    // DB status bar for current type
+    render_db_status(ui, link_type);
+
+    ui.separator();
+
     match link_type {
         LinkType::Item => render_item_fields(ui, &mut state.item_fields),
-        _ => render_simple_fields(ui, link_type, &mut state.single_fields),
+        _ => {
+            let idx = state.selected_type;
+            let fields = &mut state.searchable[idx];
+            render_searchable_fields(ui, link_type, fields);
+        }
     }
 }
 
-fn render_db_status(ui: &Ui) {
-    let (status, item_count, last_id) = {
-        let db = item_db::ITEM_DB.lock();
-        (db.status, db.items.len(), db.last_id)
-    };
+fn render_db_status(ui: &Ui, link_type: LinkType) {
+    let (status, count, error_msg, progress) = db::get_status(link_type);
 
     match status {
         DbStatus::NotLoaded => {
-            ui.text_disabled("Item DB not loaded.");
+            ui.text_disabled(&format!("{} DB: not built.", link_type.name()));
             ui.same_line();
-            if ui.small_button("Load") {
-                item_db::load_item_db();
+            if ui.small_button("Build") {
+                db::ensure_loaded(link_type);
             }
         }
         DbStatus::Loading => {
-            ui.text_disabled("Loading item database...");
+            if let Some((fetched, total)) = progress {
+                let label = format!(
+                    "Building {} DB... {} / {}",
+                    link_type.name(),
+                    format_number(fetched),
+                    format_number(total),
+                );
+                ui.text_disabled(&label);
+
+                if total > 0 {
+                    let frac = fetched as f32 / total as f32;
+                    nexus::imgui::ProgressBar::new(frac)
+                        .size([200.0, 0.0])
+                        .build(ui);
+                }
+            } else {
+                ui.text_disabled(&format!("Loading {} DB...", link_type.name()));
+            }
         }
         DbStatus::Loaded => {
-            ui.text(format!("Item DB: {} items (last ID: {})", item_count, last_id));
+            ui.text(format!(
+                "{} DB: {} entries",
+                link_type.name(),
+                format_number(count),
+            ));
             ui.same_line();
-            if ui.small_button("Check for Update") {
-                item_db::check_for_update();
+            if ui.small_button("Update") {
+                db::update(link_type);
+            }
+            ui.same_line();
+            if ui.small_button("Rebuild") {
+                db::rebuild(link_type);
+            }
+        }
+        DbStatus::Updating => {
+            if let Some((fetched, total)) = progress {
+                ui.text(format!(
+                    "{} DB: {} entries — Updating... {} / {} new",
+                    link_type.name(),
+                    format_number(count),
+                    format_number(fetched),
+                    format_number(total),
+                ));
+            } else {
+                ui.text(format!(
+                    "{} DB: {} entries — Updating...",
+                    link_type.name(),
+                    format_number(count),
+                ));
             }
         }
         DbStatus::Error => {
             let _c = ui.push_style_color(StyleColor::Text, [1.0, 0.3, 0.3, 1.0]);
-            ui.text("Item DB failed to load.");
+            ui.text(format!("{} DB failed: {}", link_type.name(), error_msg));
             ui.same_line();
             if ui.small_button("Retry") {
-                item_db::load_item_db();
+                db::ensure_loaded(link_type);
             }
-        }
-        DbStatus::Updating => {
-            ui.text("Checking for updates...");
         }
     }
 }
 
+fn format_number(n: usize) -> String {
+    if n >= 1000 {
+        let thousands = n / 1000;
+        let remainder = n % 1000;
+        format!("{},{:03}", thousands, remainder)
+    } else {
+        n.to_string()
+    }
+}
+
+/// Renders a page of search results with navigation bar.
+/// Returns Some(id) if the user clicked a result.
+fn render_paged_results(
+    ui: &Ui,
+    label_suffix: &str,
+    results: &[(u32, String)],
+    page: &mut usize,
+) -> Option<u32> {
+    if results.is_empty() {
+        return None;
+    }
+
+    let total = results.len();
+    let total_pages = (total + RESULTS_PER_PAGE - 1) / RESULTS_PER_PAGE;
+
+    // Clamp page
+    if *page >= total_pages {
+        *page = total_pages.saturating_sub(1);
+    }
+
+    let start = *page * RESULTS_PER_PAGE;
+    let end = (start + RESULTS_PER_PAGE).min(total);
+
+    let mut selected = None;
+    for &(id, ref label) in &results[start..end] {
+        if ui.small_button(&format!("{}##sel_{}{}", label, label_suffix, id)) {
+            selected = Some(id);
+        }
+    }
+
+    // Navigation bar
+    if total_pages > 1 {
+        if ui.small_button(&format!("|<< First##{}", label_suffix)) {
+            *page = 0;
+        }
+        ui.same_line();
+        if ui.small_button(&format!("< Prev##{}", label_suffix)) {
+            *page = page.saturating_sub(1);
+        }
+        ui.same_line();
+        ui.text(format!(
+            "Page {} / {} ({} results)",
+            *page + 1,
+            total_pages,
+            total,
+        ));
+        ui.same_line();
+        if ui.small_button(&format!("Next >##{}", label_suffix)) {
+            if *page + 1 < total_pages {
+                *page += 1;
+            }
+        }
+        ui.same_line();
+        if ui.small_button(&format!("Last >>|##{}", label_suffix)) {
+            *page = total_pages - 1;
+        }
+    } else {
+        ui.text_disabled(format!("{} results", total));
+    }
+
+    selected
+}
+
 fn render_item_fields(ui: &Ui, fields: &mut ItemFields) {
-    let db_loaded = {
-        let db = item_db::ITEM_DB.lock();
-        db.status == DbStatus::Loaded
-    };
+    let (status, _, _, _) = db::get_status(LinkType::Item);
+    let db_loaded = matches!(status, DbStatus::Loaded | DbStatus::Updating);
 
     // --- Item search ---
     if db_loaded {
@@ -399,8 +553,8 @@ fn render_item_fields(ui: &Ui, fields: &mut ItemFields) {
             .build();
         fields.item_search = search.clone();
         if submitted {
-            let filter = ItemFilter::ALL[fields.item_filter];
-            fields.item_results = item_db::search_items(&search, filter, MAX_SEARCH_RESULTS);
+            fields.item_results = db::items::search(&search, fields.item_filter, usize::MAX);
+            fields.item_page = 0;
         }
 
         ui.same_line();
@@ -408,20 +562,10 @@ fn render_item_fields(ui: &Ui, fields: &mut ItemFields) {
         ui.set_next_item_width(140.0);
         ui.combo("##item_filter", &mut fields.item_filter, &filter_names, |name| Cow::Borrowed(name));
 
-        if !fields.item_results.is_empty() {
-            ChildWindow::new("##item_results")
-                .size([0.0, 120.0])
-                .border(true)
-                .build(ui, || {
-                    for &(id, ref label) in &fields.item_results {
-                        if ui.small_button(&format!("{}##sel_item_{}", label, id)) {
-                            fields.id = id as i32;
-                            fields.item_results.clear();
-                            fields.item_search.clear();
-                            break;
-                        }
-                    }
-                });
+        if let Some(id) = render_paged_results(ui, "item", &fields.item_results, &mut fields.item_page) {
+            fields.id = id as i32;
+            fields.item_results.clear();
+            fields.item_search.clear();
         }
         ui.spacing();
     }
@@ -472,6 +616,7 @@ fn render_item_fields(ui: &Ui, fields: &mut ItemFields) {
                 &mut fields.upgrade1_filter,
                 &mut fields.upgrade1_results,
                 &mut fields.upgrade1_id,
+                &mut fields.upgrade1_page,
             );
         }
     }
@@ -496,6 +641,7 @@ fn render_item_fields(ui: &Ui, fields: &mut ItemFields) {
                 &mut fields.upgrade2_filter,
                 &mut fields.upgrade2_results,
                 &mut fields.upgrade2_id,
+                &mut fields.upgrade2_page,
             );
         }
     }
@@ -540,6 +686,7 @@ fn render_upgrade_search(
     filter_idx: &mut usize,
     results: &mut Vec<(u32, String)>,
     target_id: &mut i32,
+    page: &mut usize,
 ) {
     ui.indent();
     ui.set_next_item_width(180.0);
@@ -550,8 +697,8 @@ fn render_upgrade_search(
         .build();
     *search = search_buf.clone();
     if submitted {
-        let filter = UpgradeFilter::ALL[*filter_idx];
-        *results = item_db::search_upgrades(&search_buf, filter, MAX_SEARCH_RESULTS);
+        *results = db::items::search_upgrades(&search_buf, *filter_idx, usize::MAX);
+        *page = 0;
     }
 
     ui.same_line();
@@ -559,28 +706,51 @@ fn render_upgrade_search(
     ui.set_next_item_width(130.0);
     ui.combo(filter_id, filter_idx, &filter_names, |name| Cow::Borrowed(name));
 
-    if !results.is_empty() {
-        ChildWindow::new(results_id)
-            .size([0.0, 100.0])
-            .border(true)
-            .build(ui, || {
-                let mut selected = None;
-                for &(id, ref label) in results.iter() {
-                    if ui.small_button(&format!("{}##sel_{}{}", label, results_id, id)) {
-                        selected = Some(id);
-                    }
-                }
-                if let Some(id) = selected {
-                    *target_id = id as i32;
-                    results.clear();
-                    search.clear();
-                }
-            });
+    if let Some(id) = render_paged_results(ui, results_id, results, page) {
+        *target_id = id as i32;
+        results.clear();
+        search.clear();
     }
     ui.unindent();
 }
 
-fn render_simple_fields(ui: &Ui, link_type: LinkType, fields: &mut SingleFields) {
+fn render_searchable_fields(ui: &Ui, link_type: LinkType, fields: &mut SearchableFields) {
+    let (status, _, _, _) = db::get_status(link_type);
+    let db_loaded = matches!(status, DbStatus::Loaded | DbStatus::Updating);
+
+    if db_loaded {
+        ui.text(&format!("Search {} (press Enter):", link_type.name()));
+
+        ui.set_next_item_width(200.0);
+        let mut search = fields.search.clone();
+        let submitted = InputText::new(ui, "##type_search", &mut search)
+            .hint("Search by name...")
+            .flags(InputTextFlags::ENTER_RETURNS_TRUE)
+            .build();
+        fields.search = search.clone();
+
+        // Show filter combo if this type supports filtering
+        let filters = db::filter_names(link_type);
+        if !filters.is_empty() {
+            ui.same_line();
+            ui.set_next_item_width(140.0);
+            ui.combo("##type_filter", &mut fields.filter_index, &filters, |name| Cow::Borrowed(name));
+        }
+
+        if submitted {
+            fields.search_results = db::search(link_type, &search, fields.filter_index, usize::MAX);
+            fields.page = 0;
+        }
+
+        if let Some(id) = render_paged_results(ui, "type", &fields.search_results, &mut fields.page) {
+            fields.id = id as i32;
+            fields.search_results.clear();
+            fields.search.clear();
+        }
+        ui.spacing();
+    }
+
+    // Manual ID input
     ui.set_next_item_width(120.0);
     Drag::new(format!("{} ID", link_type.name()))
         .speed(1.0)
