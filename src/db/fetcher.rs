@@ -1,8 +1,22 @@
+use std::sync::atomic::Ordering;
+
 use serde::de::DeserializeOwned;
 
+fn is_shutting_down() -> bool {
+    super::SHUTTING_DOWN.load(Ordering::Relaxed)
+}
+
 const GW2_API_BASE: &str = "https://api.guildwars2.com/v2";
+
+/// Result from a batch fetch that may have partially succeeded.
+pub struct BatchResult<T> {
+    pub entries: Vec<T>,
+    pub error: Option<String>,
+}
 const BATCH_SIZE: usize = 200;
 const BATCH_DELAY_MS: u64 = 100;
+const MAX_RETRIES: u32 = 3;
+const RETRY_DELAY_MS: u64 = 1000;
 
 /// Fetch all IDs from an endpoint (e.g. `/v2/items` returns `[1,2,3,...]`).
 pub async fn fetch_all_ids(
@@ -31,14 +45,16 @@ pub async fn fetch_all_ids(
     Ok(ids)
 }
 
-/// Batch-fetch entries from an endpoint using `?ids=1,2,3,...` in chunks of 200.
+/// Batch-fetch entries from an endpoint using `?ids=1,2,3,...` in chunks of 300.
 /// Calls `on_progress(fetched_so_far, total)` after each batch.
+/// Returns a `BatchResult` containing all successfully fetched entries plus
+/// an optional error if the fetch was interrupted or a batch failed.
 pub async fn batch_fetch<T: DeserializeOwned>(
     client: &reqwest::Client,
     endpoint: &str,
     ids: &[u32],
     on_progress: &dyn Fn(usize, usize),
-) -> Result<Vec<T>, String> {
+) -> BatchResult<T> {
     let total = ids.len();
     let num_batches = (total + BATCH_SIZE - 1) / BATCH_SIZE;
     super::log_debug(&format!(
@@ -48,6 +64,13 @@ pub async fn batch_fetch<T: DeserializeOwned>(
     let mut results: Vec<T> = Vec::with_capacity(total);
 
     for (i, chunk) in ids.chunks(BATCH_SIZE).enumerate() {
+        if is_shutting_down() {
+            return BatchResult {
+                entries: results,
+                error: Some("[fetcher] Aborted: plugin is unloading".to_string()),
+            };
+        }
+
         let ids_param: String = chunk
             .iter()
             .map(|id| id.to_string())
@@ -55,34 +78,60 @@ pub async fn batch_fetch<T: DeserializeOwned>(
             .join(",");
         let url = format!("{}{}?ids={}", GW2_API_BASE, endpoint, ids_param);
 
-        let resp = client.get(&url).send().await.map_err(|e| {
-            let msg = format!(
-                "[fetcher] HTTP error on batch {}/{} for {}: {}",
-                i + 1, num_batches, endpoint, e
-            );
-            super::log_error(&msg);
-            e.to_string()
-        })?;
+        let mut last_err = String::new();
+        let mut success = false;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let msg = format!(
-                "[fetcher] Non-200 status {} on batch {}/{} for {}",
-                status, i + 1, num_batches, endpoint
-            );
-            super::log_error(&msg);
-            return Err(msg);
+        for attempt in 0..MAX_RETRIES {
+            if attempt > 0 {
+                super::log_debug(&format!(
+                    "[fetcher] Retry {}/{} for batch {}/{} of {}",
+                    attempt, MAX_RETRIES - 1, i + 1, num_batches, endpoint
+                ));
+                tokio::time::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS * (attempt as u64))).await;
+            }
+
+            let resp = match client.get(&url).send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    last_err = format!(
+                        "[fetcher] HTTP error on batch {}/{} for {}: {}",
+                        i + 1, num_batches, endpoint, e
+                    );
+                    continue;
+                }
+            };
+
+            let status = resp.status();
+            if !status.is_success() {
+                last_err = format!(
+                    "[fetcher] Non-200 status {} on batch {}/{} for {}",
+                    status, i + 1, num_batches, endpoint
+                );
+                continue;
+            }
+
+            match resp.json::<Vec<T>>().await {
+                Ok(mut batch) => {
+                    results.append(&mut batch);
+                    success = true;
+                    break;
+                }
+                Err(e) => {
+                    last_err = format!(
+                        "[fetcher] Parse error on batch {}/{} for {}: {}",
+                        i + 1, num_batches, endpoint, e
+                    );
+                }
+            }
         }
 
-        let mut batch: Vec<T> = resp.json().await.map_err(|e| {
-            let msg = format!(
-                "[fetcher] Parse error on batch {}/{} for {}: {}",
-                i + 1, num_batches, endpoint, e
-            );
-            super::log_error(&msg);
-            e.to_string()
-        })?;
-        results.append(&mut batch);
+        if !success {
+            super::log_error(&last_err);
+            return BatchResult {
+                entries: results,
+                error: Some(last_err),
+            };
+        }
 
         on_progress(results.len(), total);
 
@@ -95,7 +144,10 @@ pub async fn batch_fetch<T: DeserializeOwned>(
         "[fetcher] batch_fetch {} complete - {} entries",
         endpoint, results.len()
     ));
-    Ok(results)
+    BatchResult {
+        entries: results,
+        error: None,
+    }
 }
 
 /// Like `batch_fetch` but skips batches that fail (e.g. invalid IDs) instead of
@@ -117,6 +169,10 @@ pub async fn batch_fetch_lenient<T: DeserializeOwned>(
     let mut skipped: usize = 0;
 
     for (i, chunk) in ids.chunks(BATCH_SIZE).enumerate() {
+        if is_shutting_down() {
+            return Err("[fetcher] Aborted: plugin is unloading".to_string());
+        }
+
         let ids_param: String = chunk
             .iter()
             .map(|id| id.to_string())
@@ -124,40 +180,57 @@ pub async fn batch_fetch_lenient<T: DeserializeOwned>(
             .join(",");
         let url = format!("{}{}?ids={}", GW2_API_BASE, endpoint, ids_param);
 
-        let resp = match client.get(&url).send().await {
-            Ok(r) => r,
-            Err(e) => {
+        let mut batch_success = false;
+
+        for attempt in 0..MAX_RETRIES {
+            if attempt > 0 {
                 super::log_debug(&format!(
-                    "[fetcher] Skipping batch {}/{} for {} (HTTP error: {})",
-                    i + 1, num_batches, endpoint, e
+                    "[fetcher] Retry {}/{} for batch {}/{} of {}",
+                    attempt, MAX_RETRIES - 1, i + 1, num_batches, endpoint
                 ));
-                skipped += chunk.len();
-                on_progress(results.len() + skipped, total);
+                tokio::time::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS * (attempt as u64))).await;
+            }
+
+            let resp = match client.get(&url).send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    super::log_debug(&format!(
+                        "[fetcher] HTTP error on batch {}/{} for {} (attempt {}): {}",
+                        i + 1, num_batches, endpoint, attempt + 1, e
+                    ));
+                    continue;
+                }
+            };
+
+            if !resp.status().is_success() {
+                super::log_debug(&format!(
+                    "[fetcher] Non-200 status {} on batch {}/{} for {} (attempt {})",
+                    resp.status(), i + 1, num_batches, endpoint, attempt + 1
+                ));
                 continue;
             }
-        };
 
-        if !resp.status().is_success() {
-            super::log_debug(&format!(
-                "[fetcher] Skipping batch {}/{} for {} (status {})",
-                i + 1, num_batches, endpoint, resp.status()
-            ));
-            skipped += chunk.len();
-            on_progress(results.len() + skipped, total);
-            continue;
+            match resp.json::<Vec<T>>().await {
+                Ok(mut batch) => {
+                    results.append(&mut batch);
+                    batch_success = true;
+                    break;
+                }
+                Err(e) => {
+                    super::log_debug(&format!(
+                        "[fetcher] Parse error on batch {}/{} for {} (attempt {}): {}",
+                        i + 1, num_batches, endpoint, attempt + 1, e
+                    ));
+                }
+            }
         }
 
-        match resp.json::<Vec<T>>().await {
-            Ok(mut batch) => {
-                results.append(&mut batch);
-            }
-            Err(e) => {
-                super::log_debug(&format!(
-                    "[fetcher] Skipping batch {}/{} for {} (parse error: {})",
-                    i + 1, num_batches, endpoint, e
-                ));
-                skipped += chunk.len();
-            }
+        if !batch_success {
+            super::log_debug(&format!(
+                "[fetcher] Skipping batch {}/{} for {} after {} retries",
+                i + 1, num_batches, endpoint, MAX_RETRIES
+            ));
+            skipped += chunk.len();
         }
 
         on_progress(results.len() + skipped, total);

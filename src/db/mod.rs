@@ -7,9 +7,15 @@ pub mod skins;
 pub mod outfits;
 pub mod pois;
 
+use std::sync::atomic::AtomicBool;
+
 use crate::encoder::LinkType;
 
 const LOG_TAG: &str = "Chat Link Generator";
+
+/// Global shutdown flag — set to `true` on plugin unload so background threads
+/// can bail out early instead of blocking the game.
+pub static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
 pub fn log_debug(msg: &str) {
     nexus::log::log(nexus::log::LogLevel::Info, LOG_TAG, msg);

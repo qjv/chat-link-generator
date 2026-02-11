@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
@@ -171,9 +172,39 @@ pub fn rebuild() {
     });
 }
 
-/// POIs use traversal-based fetching, so update just does a full rebuild.
+/// POIs use traversal-based fetching. Update fetches all floors but merges
+/// new POIs into the existing set rather than starting from scratch.
 pub fn update() {
-    rebuild();
+    {
+        let db = DB.lock();
+        if matches!(db.status, DbStatus::Loading | DbStatus::Updating) {
+            log_debug(&format!("[{}] update skipped - already loading/updating", DB_NAME));
+            return;
+        }
+        if db.status != DbStatus::Loaded {
+            log_debug(&format!("[{}] update skipped - not loaded yet", DB_NAME));
+            return;
+        }
+    }
+    {
+        let mut db = DB.lock();
+        db.status = DbStatus::Updating;
+        db.progress = None;
+    }
+    log_debug(&format!("[{}] Starting incremental update", DB_NAME));
+
+    std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(|| {
+            fetch_and_merge();
+        });
+        if let Err(e) = result {
+            let msg = format!("[{}] PANIC in update thread: {:?}", DB_NAME, e);
+            log_error(&msg);
+            let mut db = DB.lock();
+            db.error_msg = msg;
+            db.status = DbStatus::Loaded; // keep existing data usable
+        }
+    });
 }
 
 fn fetch_from_api() {
@@ -224,6 +255,11 @@ fn fetch_from_api() {
         // Traverse each floor
         for (cid, floor_ids) in &continent_floors {
             for &fid in floor_ids {
+                if super::SHUTTING_DOWN.load(Ordering::Relaxed) {
+                    log_debug(&format!("[{}] Aborted: plugin is unloading", DB_NAME));
+                    return Err("[pois] Aborted: plugin is unloading".to_string());
+                }
+
                 let url = format!(
                     "{}/continents/{}/floors/{}",
                     GW2_API_BASE, cid, fid
@@ -232,41 +268,7 @@ fn fetch_from_api() {
                 let resp = client.get(&url).send().await;
                 if let Ok(resp) = resp {
                     if let Ok(floor) = resp.json::<FloorResponse>().await {
-                        for region in floor.regions.values() {
-                            for map in region.maps.values() {
-                                for raw_poi in map.points_of_interest.values() {
-                                    let Some(id) = raw_poi.id else { continue };
-                                    let Some(poi_type) = raw_poi.poi_type.as_deref() else {
-                                        continue;
-                                    };
-
-                                    // Only keep relevant types
-                                    if !matches!(
-                                        poi_type,
-                                        "waypoint" | "landmark" | "vista" | "unlock"
-                                    ) {
-                                        continue;
-                                    }
-
-                                    let name = raw_poi
-                                        .name
-                                        .as_deref()
-                                        .unwrap_or("")
-                                        .to_string();
-
-                                    // Skip unnamed entries
-                                    if name.is_empty() {
-                                        continue;
-                                    }
-
-                                    all_pois.entry(id).or_insert_with(|| Poi {
-                                        id,
-                                        name,
-                                        poi_type: poi_type.to_string(),
-                                    });
-                                }
-                            }
-                        }
+                        extract_pois_from_floor(&floor, &mut all_pois);
                     }
                 }
 
@@ -304,6 +306,131 @@ fn fetch_from_api() {
             db.error_msg = e;
             db.status = DbStatus::Error;
             db.progress = None;
+        }
+    }
+}
+
+/// Fetches all floors and merges new POIs into the existing database.
+fn fetch_and_merge() {
+    log_debug(&format!("[{}] fetch_and_merge starting", DB_NAME));
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build();
+
+    let rt = match rt {
+        Ok(rt) => rt,
+        Err(e) => {
+            log_error(&format!("[{}] Failed to create tokio runtime: {}", DB_NAME, e));
+            let mut db = DB.lock();
+            db.status = DbStatus::Loaded;
+            return;
+        }
+    };
+
+    let result = rt.block_on(async {
+        let client = super::fetcher::make_client()?;
+        let mut new_pois: HashMap<u32, Poi> = HashMap::new();
+        let mut floors_done: usize = 0;
+        let mut floors_total: usize = 0;
+
+        let mut continent_floors: Vec<(u32, Vec<i32>)> = Vec::new();
+        for &cid in CONTINENT_IDS {
+            let url = format!("{}/continents/{}/floors", GW2_API_BASE, cid);
+            let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+            let floor_ids: Vec<i32> = resp.json().await.map_err(|e| e.to_string())?;
+            floors_total += floor_ids.len();
+            continent_floors.push((cid, floor_ids));
+        }
+
+        for (cid, floor_ids) in &continent_floors {
+            for &fid in floor_ids {
+                if super::SHUTTING_DOWN.load(Ordering::Relaxed) {
+                    return Err("[pois] Aborted: plugin is unloading".to_string());
+                }
+
+                let url = format!("{}/continents/{}/floors/{}", GW2_API_BASE, cid, fid);
+                let resp = client.get(&url).send().await;
+                if let Ok(resp) = resp {
+                    if let Ok(floor) = resp.json::<FloorResponse>().await {
+                        extract_pois_from_floor(&floor, &mut new_pois);
+                    }
+                }
+
+                floors_done += 1;
+                {
+                    let mut db = DB.lock();
+                    db.progress = Some((floors_done, floors_total));
+                }
+
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
+
+        Ok::<HashMap<u32, Poi>, String>(new_pois)
+    });
+
+    let mut db = DB.lock();
+    match result {
+        Ok(new_pois) => {
+            let existing_ids: std::collections::HashSet<u32> =
+                db.entries.iter().map(|p| p.id).collect();
+            let mut added = 0;
+            for (id, poi) in new_pois {
+                if !existing_ids.contains(&id) {
+                    db.entries.push(poi);
+                    added += 1;
+                }
+            }
+            if added > 0 {
+                log_debug(&format!("[{}] Update found {} new POIs", DB_NAME, added));
+                db.entries.sort_by_key(|p| p.id);
+                super::save_to_cache(CACHE_FILE, &db.entries);
+            } else {
+                log_debug(&format!("[{}] Already up to date", DB_NAME));
+            }
+            db.status = DbStatus::Loaded;
+            db.progress = None;
+        }
+        Err(e) => {
+            log_error(&format!("[{}] Update failed: {}", DB_NAME, e));
+            db.status = DbStatus::Loaded; // keep existing data
+            db.progress = None;
+        }
+    }
+}
+
+fn extract_pois_from_floor(floor: &FloorResponse, pois: &mut HashMap<u32, Poi>) {
+    for region in floor.regions.values() {
+        for map in region.maps.values() {
+            for raw_poi in map.points_of_interest.values() {
+                let Some(id) = raw_poi.id else { continue };
+                let Some(poi_type) = raw_poi.poi_type.as_deref() else {
+                    continue;
+                };
+
+                if !matches!(
+                    poi_type,
+                    "waypoint" | "landmark" | "vista" | "unlock"
+                ) {
+                    continue;
+                }
+
+                let name = raw_poi
+                    .name
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_string();
+
+                if name.is_empty() {
+                    continue;
+                }
+
+                pois.entry(id).or_insert_with(|| Poi {
+                    id,
+                    name,
+                    poi_type: poi_type.to_string(),
+                });
+            }
         }
     }
 }

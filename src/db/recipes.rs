@@ -176,7 +176,7 @@ fn fetch_new_from_api() {
         }
 
         log_debug(&format!("[{}] Fetching {} new recipes", DB_NAME, new_ids.len()));
-        let raw_recipes = super::fetcher::batch_fetch::<RawRecipe>(
+        let batch = super::fetcher::batch_fetch::<RawRecipe>(
             &client,
             "/recipes",
             &new_ids,
@@ -185,7 +185,15 @@ fn fetch_new_from_api() {
                 db.progress = Some((fetched, total));
             },
         )
-        .await?;
+        .await;
+
+        if let Some(ref err) = batch.error {
+            if batch.entries.is_empty() {
+                return Err(err.clone());
+            }
+            log_error(&format!("[{}] Partial fetch ({} entries): {}", DB_NAME, batch.entries.len(), err));
+        }
+        let raw_recipes = batch.entries;
 
         // Collect unique output_item_ids and fetch their names
         let unique_item_ids: Vec<u32> = {
@@ -270,7 +278,7 @@ fn fetch_from_api() {
         let total_recipes = ids.len();
         log_debug(&format!("[{}] Phase 1: Fetching {} recipes", DB_NAME, total_recipes));
 
-        let raw_recipes = super::fetcher::batch_fetch::<RawRecipe>(
+        let batch = super::fetcher::batch_fetch::<RawRecipe>(
             &client,
             "/recipes",
             &ids,
@@ -279,7 +287,15 @@ fn fetch_from_api() {
                 db.progress = Some((fetched, total));
             },
         )
-        .await?;
+        .await;
+
+        if let Some(ref err) = batch.error {
+            if batch.entries.is_empty() {
+                return Err(err.clone());
+            }
+            log_error(&format!("[{}] Partial fetch ({} entries): {}", DB_NAME, batch.entries.len(), err));
+        }
+        let raw_recipes = batch.entries;
 
         // Phase 2: Collect unique output_item_ids and fetch their names
         let unique_item_ids: Vec<u32> = {

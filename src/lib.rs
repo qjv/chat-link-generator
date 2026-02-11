@@ -47,6 +47,7 @@ fn load() {
 }
 
 fn unload() {
+    db::SHUTTING_DOWN.store(true, std::sync::atomic::Ordering::Relaxed);
     save_user_config();
 }
 

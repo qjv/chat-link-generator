@@ -385,7 +385,7 @@ fn fetch_new_from_api() {
         }
 
         log_debug(&format!("[{}] Fetching {} new entries", DB_NAME, new_ids.len()));
-        let raw_items = super::fetcher::batch_fetch::<RawItem>(
+        let batch = super::fetcher::batch_fetch::<RawItem>(
             &client,
             "/items",
             &new_ids,
@@ -394,9 +394,9 @@ fn fetch_new_from_api() {
                 db.progress = Some((fetched, total));
             },
         )
-        .await?;
+        .await;
 
-        let entries: Vec<Item> = raw_items
+        let entries: Vec<Item> = batch.entries
             .into_iter()
             .map(|raw| Item {
                 id: raw.id,
@@ -408,6 +408,13 @@ fn fetch_new_from_api() {
                     .unwrap_or_default(),
             })
             .collect();
+
+        if let Some(err) = batch.error {
+            if entries.is_empty() {
+                return Err(err);
+            }
+            log_error(&format!("[{}] Partial fetch ({} entries): {}", DB_NAME, entries.len(), err));
+        }
 
         Ok::<Vec<Item>, String>(entries)
     });
@@ -453,7 +460,7 @@ fn fetch_from_api() {
         let ids = super::fetcher::fetch_all_ids(&client, "/items").await?;
 
         log_debug(&format!("[{}] Fetching {} entries from API", DB_NAME, ids.len()));
-        let raw_items = super::fetcher::batch_fetch::<RawItem>(
+        let batch = super::fetcher::batch_fetch::<RawItem>(
             &client,
             "/items",
             &ids,
@@ -462,10 +469,10 @@ fn fetch_from_api() {
                 db.progress = Some((fetched, total));
             },
         )
-        .await?;
+        .await;
 
-        log_debug(&format!("[{}] Converting {} raw items", DB_NAME, raw_items.len()));
-        let entries: Vec<Item> = raw_items
+        log_debug(&format!("[{}] Converting {} raw items", DB_NAME, batch.entries.len()));
+        let entries: Vec<Item> = batch.entries
             .into_iter()
             .map(|raw| Item {
                 id: raw.id,
@@ -477,6 +484,13 @@ fn fetch_from_api() {
                     .unwrap_or_default(),
             })
             .collect();
+
+        if let Some(err) = batch.error {
+            if entries.is_empty() {
+                return Err(err);
+            }
+            log_error(&format!("[{}] Partial fetch ({} entries): {}", DB_NAME, entries.len(), err));
+        }
 
         Ok::<Vec<Item>, String>(entries)
     });

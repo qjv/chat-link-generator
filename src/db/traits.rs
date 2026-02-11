@@ -157,7 +157,7 @@ fn fetch_new_from_api() {
         }
 
         log_debug(&format!("[{}] Fetching {} new entries", DB_NAME, new_ids.len()));
-        let entries = super::fetcher::batch_fetch::<GwTrait>(
+        let batch = super::fetcher::batch_fetch::<GwTrait>(
             &client,
             "/traits",
             &new_ids,
@@ -166,9 +166,16 @@ fn fetch_new_from_api() {
                 db.progress = Some((fetched, total));
             },
         )
-        .await?;
+        .await;
 
-        Ok::<Vec<GwTrait>, String>(entries)
+        if let Some(err) = batch.error {
+            if batch.entries.is_empty() {
+                return Err(err);
+            }
+            log_error(&format!("[{}] Partial fetch ({} entries): {}", DB_NAME, batch.entries.len(), err));
+        }
+
+        Ok::<Vec<GwTrait>, String>(batch.entries)
     });
 
     let mut db = DB.lock();
@@ -212,7 +219,7 @@ fn fetch_from_api() {
         let ids = super::fetcher::fetch_all_ids(&client, "/traits").await?;
 
         log_debug(&format!("[{}] Fetching {} entries from API", DB_NAME, ids.len()));
-        let entries = super::fetcher::batch_fetch::<GwTrait>(
+        let batch = super::fetcher::batch_fetch::<GwTrait>(
             &client,
             "/traits",
             &ids,
@@ -221,9 +228,16 @@ fn fetch_from_api() {
                 db.progress = Some((fetched, total));
             },
         )
-        .await?;
+        .await;
 
-        Ok::<Vec<GwTrait>, String>(entries)
+        if let Some(err) = batch.error {
+            if batch.entries.is_empty() {
+                return Err(err);
+            }
+            log_error(&format!("[{}] Partial fetch ({} entries): {}", DB_NAME, batch.entries.len(), err));
+        }
+
+        Ok::<Vec<GwTrait>, String>(batch.entries)
     });
 
     let mut db = DB.lock();
