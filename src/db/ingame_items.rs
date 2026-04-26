@@ -63,8 +63,10 @@ const DECODE_TEXT_PATTERN: &str =
     "48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 49 8B E8 48 8B F2 48 8B F9 48 85 C9 75 19";
 
 const MAX_IDS_FALLBACK: u32 = 2_000_000;
-const ITEM_SCAN_PER_TICK: usize = 192;
-const DECODES_PER_TICK: usize = 12;
+const ITEM_SCAN_PER_TICK: usize = 12;
+const ITEM_SCAN_BUDGET_MS: u64 = 1;
+const DECODES_PER_TICK: usize = 1;
+const NAME_PARSE_BUDGET_MS: u64 = 1;
 const GAME_DATA_PER_TICK: usize = 24;
 const MAP_GAME_DATA_PER_TICK: usize = 1;
 const WARDROBE_GAME_DATA_PER_TICK: usize = 4;
@@ -208,10 +210,11 @@ enum NameParsePhase {
 
 struct ScanJob {
     mode: JobMode,
+    start_id: u32,
     current_id: u32,
     end_id: u32,
-    miss_streak: u32,
     processed: usize,
+    added: usize,
 }
 
 struct NameParseJob {
@@ -1184,7 +1187,8 @@ pub fn update() {
     s.progress = Some((0, 0));
     s.status = DbStatus::Updating;
 
-    start_job(&mut s, JobMode::Update, 0);
+    let max_existing = s.entries.iter().map(|e| e.id).max().unwrap_or(0);
+    start_job(&mut s, JobMode::Update, max_existing.saturating_add(1));
 }
 
 pub fn maybe_auto_update_on_load() {
@@ -1388,7 +1392,7 @@ pub fn tick() {
             return;
         };
 
-        let (_, count_defs, iterate_content_defs) = unsafe {
+        let (get_content_by_index, _, _) = unsafe {
             match resolve_content_vfuncs(content_ctx) {
                 Some(v) => v,
                 None => {
@@ -1398,33 +1402,25 @@ pub fn tick() {
             }
         };
 
-        let total = unsafe { count_defs(content_ctx, ITEM_CONTENT_TYPE) }.max(0) as usize;
-        if total == 0 {
-            finalize_job(&mut s, job);
-            return;
-        }
-        job.end_id = total as u32;
-
-        let mut exhausted = false;
+        let total = job.end_id.saturating_sub(job.start_id).saturating_add(1) as usize;
+        let scan_started = Instant::now();
         for _ in 0..ITEM_SCAN_PER_TICK {
-            if job.processed >= total {
+            if job.current_id > job.end_id {
+                break;
+            }
+            if scan_started.elapsed() >= Duration::from_millis(ITEM_SCAN_BUDGET_MS) {
                 break;
             }
 
-            let item_ptr = unsafe {
-                iterate_content_defs(
-                    content_ctx,
-                    ITEM_CONTENT_TYPE,
-                    &mut job.current_id as *mut u32,
-                )
-            };
-            if item_ptr.is_null() {
-                exhausted = true;
-                break;
-            }
+            let id = job.current_id;
+            job.current_id = job.current_id.saturating_add(1);
             job.processed = job.processed.saturating_add(1);
+            let item_ptr = unsafe { get_content_by_index(content_ctx, ITEM_CONTENT_TYPE, id) };
+            if item_ptr.is_null() {
+                continue;
+            }
             if let Some((entry, content_index, name_hash, description_hash, upgrade_name_hash, base_upgrade_item_id)) =
-                unsafe { read_item_entry(&s, item_ptr, 0) }
+                unsafe { read_item_entry(&s, item_ptr, id) }
             {
                 if matches!(job.mode, JobMode::Rebuild)
                     || !s.entry_index.contains_key(&entry.id)
@@ -1437,13 +1433,12 @@ pub fn tick() {
                         upgrade_name_hash,
                         base_upgrade_item_id,
                     );
+                    job.added = job.added.saturating_add(1);
                 }
-            } else {
-                job.miss_streak = job.miss_streak.saturating_add(1);
             }
         }
 
-        let done = exhausted || job.processed >= total;
+        let done = job.current_id > job.end_id;
 
         s.progress = Some((job.processed.min(total), total));
 
@@ -1480,7 +1475,11 @@ pub fn tick() {
         };
 
         let mut steps = 0usize;
+        let parse_started = Instant::now();
         while job.cursor < job.ids.len() && steps < DECODES_PER_TICK.max(1) {
+            if parse_started.elapsed() >= Duration::from_millis(NAME_PARSE_BUDGET_MS) {
+                break;
+            }
             let id = job.ids[job.cursor];
             job.cursor += 1;
             steps += 1;
@@ -2565,25 +2564,26 @@ pub fn get_item(id: u32) -> Option<InGameItem> {
 fn start_job(state: &mut State, mode: JobMode, start_id: u32) {
     ensure_scan_pointers(state);
 
-    let suggested_end = unsafe { suggest_end_id_from_content_count(state) };
-
-    let end_id = suggested_end.max(1);
+    let start_id = start_id.max(1);
+    let end_id = MAX_IDS_FALLBACK;
+    let total = end_id.saturating_sub(start_id).saturating_add(1);
 
     state.scan = Some(ScanJob {
         mode,
+        start_id,
         current_id: start_id,
         end_id,
-        miss_streak: 0,
         processed: 0,
+        added: 0,
     });
 
     db::log_debug(&format!(
-        "{} started {:?}: id {}..{}",
-        LOG_PREFIX, mode, start_id, end_id
+        "{} started {:?}: probing item ids {}..{} ({} ids)",
+        LOG_PREFIX, mode, start_id, end_id, total
     ));
 }
 
-fn finalize_job(state: &mut State, _job: ScanJob) {
+fn finalize_job(state: &mut State, job: ScanJob) {
     state.entries.sort_by_key(|e| e.id);
     rebuild_entry_index_in_state(state);
 
@@ -2595,6 +2595,10 @@ fn finalize_job(state: &mut State, _job: ScanJob) {
 
     state.status = DbStatus::Loaded;
     state.progress = None;
+    db::log_debug(&format!(
+        "{} finished {:?}: scanned {} ids, added/updated {}",
+        LOG_PREFIX, job.mode, job.processed, job.added
+    ));
 }
 
 fn rebuild_entry_index(entries: &[InGameItem], out: &mut HashMap<u32, usize>) {

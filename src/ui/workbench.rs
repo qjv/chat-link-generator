@@ -374,6 +374,7 @@ fn render_browser_table(ui: &Ui) {
         ui.text(format!("Rows: {}", format_number(total)));
         ui.same_line();
         render_page_nav(ui, "browse", &mut st.page, total);
+        handle_page_wheel(ui, &mut st.page, total);
 
         let visible = &st.rows[start..end];
         let widths = catalog_table_widths(ui, visible);
@@ -858,6 +859,22 @@ fn render_page_nav(ui: &Ui, label: &str, page: &mut usize, total: usize) {
     ui.same_line();
     if ui.small_button(&format!("Last##{}_last", label)) {
         *page = pages.saturating_sub(1);
+    }
+}
+
+fn handle_page_wheel(ui: &Ui, page: &mut usize, total: usize) {
+    let wheel = ui.io().mouse_wheel;
+    if wheel == 0.0 || !ui.is_window_hovered() {
+        return;
+    }
+    let pages = total_pages(total);
+    if pages <= 1 {
+        return;
+    }
+    if wheel < 0.0 && *page + 1 < pages {
+        *page += 1;
+    } else if wheel > 0.0 {
+        *page = page.saturating_sub(1);
     }
 }
 
