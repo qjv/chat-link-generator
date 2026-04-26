@@ -1,4 +1,5 @@
 mod config;
+mod catalog;
 mod db;
 mod encoder;
 mod ui;
@@ -30,7 +31,7 @@ fn load() {
     .revert_on_unload();
 
     register_render(RenderType::Render, render!(|ui| {
-        ui::main_window::render_main_window(ui);
+        ui::workbench::render_workbench_window(ui);
     }))
     .revert_on_unload();
 

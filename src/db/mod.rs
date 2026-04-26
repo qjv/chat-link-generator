@@ -28,7 +28,7 @@ pub fn log_error(msg: &str) {
     nexus::log::log(nexus::log::LogLevel::Critical, LOG_TAG, msg);
 }
 
-#[derive(PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum DbStatus {
     NotLoaded,
     Loading,

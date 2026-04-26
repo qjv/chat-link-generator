@@ -3687,7 +3687,7 @@ unsafe fn read_poi_metadata(
     state: &mut State,
     poi_ptr: *const u8,
     expected_id: u32,
-    prop_ctx: *const u8,
+    _prop_ctx: *const u8,
 ) -> Option<(u32, u32, String)> {
     if !is_readable(poi_ptr, POI_DEF_TYPE + std::mem::size_of::<u32>()) {
         return None;
