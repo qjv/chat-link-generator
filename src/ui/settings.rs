@@ -14,7 +14,12 @@ pub fn render_settings(ui: &Ui) {
 
     let type_names: Vec<&str> = LinkType::ALL.iter().map(|t| t.name()).collect();
     ui.set_next_item_width(180.0);
-    ui.combo("Default Type", &mut cfg.link_type_index, &type_names, |name| Cow::Borrowed(name));
+    ui.combo(
+        "Default Type",
+        &mut cfg.link_type_index,
+        &type_names,
+        |name| Cow::Borrowed(name),
+    );
 
     ui.set_next_item_width(80.0);
     Drag::new("Default Batch Size")
@@ -23,6 +28,10 @@ pub fn render_settings(ui: &Ui) {
         .build(ui, &mut cfg.batch_size);
 
     ui.checkbox("Show ID Prefix", &mut cfg.show_id_prefix);
+    ui.checkbox(
+        "Auto-update In-Game Item DB on load",
+        &mut cfg.auto_update_item_db_on_load,
+    );
 
     // Drop cfg lock before calling db functions
     drop(cfg);

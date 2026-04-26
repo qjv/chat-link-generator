@@ -108,6 +108,12 @@ pub fn generate_item_link(
     second_upgrade_id: Option<u32>,
 ) -> String {
     let id_bytes = encode_id_le3(id);
+    let has_extras = skin_id.is_some() || first_upgrade_id.is_some() || second_upgrade_id.is_some();
+
+    if !has_extras {
+        let bytes = vec![0x02, quantity, id_bytes[0], id_bytes[1], id_bytes[2], 0x00];
+        return format_chat_link(&bytes);
+    }
 
     let mut flags: u8 = 0;
     if skin_id.is_some() {

@@ -4,9 +4,9 @@ use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use super::{DbEntry, DbStatus, GenericDatabase, log_debug, log_error};
+use super::{log_debug, log_error, DbEntry, DbStatus, GenericDatabase};
 
-const CACHE_FILE: &str = "db_outfits.json";
+const CACHE_FILE: &str = "db_api_outfits.json";
 const DB_NAME: &str = "outfits";
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -35,8 +35,15 @@ pub static DB: Lazy<Mutex<GenericDatabase<Outfit>>> =
 pub fn ensure_loaded() {
     {
         let db = DB.lock();
-        log_debug(&format!("[{}] ensure_loaded - current status: {:?}", DB_NAME, status_str(db.status)));
-        if matches!(db.status, DbStatus::Loading | DbStatus::Loaded | DbStatus::Updating) {
+        log_debug(&format!(
+            "[{}] ensure_loaded - current status: {:?}",
+            DB_NAME,
+            status_str(db.status)
+        ));
+        if matches!(
+            db.status,
+            DbStatus::Loading | DbStatus::Loaded | DbStatus::Updating
+        ) {
             return;
         }
     }
@@ -51,7 +58,11 @@ pub fn ensure_loaded() {
             // Try cache first
             if let Some(entries) = super::load_from_cache::<Outfit>(CACHE_FILE) {
                 if !entries.is_empty() {
-                    log_debug(&format!("[{}] Loaded {} entries from cache", DB_NAME, entries.len()));
+                    log_debug(&format!(
+                        "[{}] Loaded {} entries from cache",
+                        DB_NAME,
+                        entries.len()
+                    ));
                     let mut db = DB.lock();
                     db.entries = entries;
                     db.status = DbStatus::Loaded;
@@ -75,7 +86,10 @@ pub fn rebuild() {
     {
         let mut db = DB.lock();
         if matches!(db.status, DbStatus::Loading | DbStatus::Updating) {
-            log_debug(&format!("[{}] rebuild skipped - already loading/updating", DB_NAME));
+            log_debug(&format!(
+                "[{}] rebuild skipped - already loading/updating",
+                DB_NAME
+            ));
             return;
         }
         db.status = DbStatus::Loading;
@@ -83,7 +97,10 @@ pub fn rebuild() {
         db.error_msg.clear();
         db.progress = None;
     }
-    log_debug(&format!("[{}] Deleting cache and starting rebuild", DB_NAME));
+    log_debug(&format!(
+        "[{}] Deleting cache and starting rebuild",
+        DB_NAME
+    ));
     super::delete_cache(CACHE_FILE);
 
     std::thread::spawn(move || {
@@ -131,10 +148,16 @@ pub fn update() {
 }
 
 fn fetch_new_from_api() {
-    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
         Ok(rt) => rt,
         Err(e) => {
-            log_error(&format!("[{}] Failed to create tokio runtime: {}", DB_NAME, e));
+            log_error(&format!(
+                "[{}] Failed to create tokio runtime: {}",
+                DB_NAME, e
+            ));
             let mut db = DB.lock();
             db.status = DbStatus::Loaded;
             return;
@@ -150,14 +173,21 @@ fn fetch_new_from_api() {
             db.entries.iter().map(|e| e.id).collect()
         };
 
-        let new_ids: Vec<u32> = all_ids.into_iter().filter(|id| !existing_ids.contains(id)).collect();
+        let new_ids: Vec<u32> = all_ids
+            .into_iter()
+            .filter(|id| !existing_ids.contains(id))
+            .collect();
 
         if new_ids.is_empty() {
             log_debug(&format!("[{}] Already up to date", DB_NAME));
             return Ok(Vec::new());
         }
 
-        log_debug(&format!("[{}] Fetching {} new entries", DB_NAME, new_ids.len()));
+        log_debug(&format!(
+            "[{}] Fetching {} new entries",
+            DB_NAME,
+            new_ids.len()
+        ));
         let batch = super::fetcher::batch_fetch::<Outfit>(
             &client,
             "/outfits",
@@ -173,7 +203,12 @@ fn fetch_new_from_api() {
             if batch.entries.is_empty() {
                 return Err(err);
             }
-            log_error(&format!("[{}] Partial fetch ({} entries): {}", DB_NAME, batch.entries.len(), err));
+            log_error(&format!(
+                "[{}] Partial fetch ({} entries): {}",
+                DB_NAME,
+                batch.entries.len(),
+                err
+            ));
         }
 
         Ok::<Vec<Outfit>, String>(batch.entries)
@@ -183,7 +218,11 @@ fn fetch_new_from_api() {
     match result {
         Ok(new_entries) => {
             if !new_entries.is_empty() {
-                log_debug(&format!("[{}] Update complete, {} new entries", DB_NAME, new_entries.len()));
+                log_debug(&format!(
+                    "[{}] Update complete, {} new entries",
+                    DB_NAME,
+                    new_entries.len()
+                ));
                 db.entries.extend(new_entries);
                 super::save_to_cache(CACHE_FILE, &db.entries);
             }
@@ -207,7 +246,10 @@ fn fetch_from_api() {
     let rt = match rt {
         Ok(rt) => rt,
         Err(e) => {
-            log_error(&format!("[{}] Failed to create tokio runtime: {}", DB_NAME, e));
+            log_error(&format!(
+                "[{}] Failed to create tokio runtime: {}",
+                DB_NAME, e
+            ));
             let mut db = DB.lock();
             db.error_msg = e.to_string();
             db.status = DbStatus::Error;
@@ -219,23 +261,28 @@ fn fetch_from_api() {
         let client = super::fetcher::make_client()?;
         let ids = super::fetcher::fetch_all_ids(&client, "/outfits").await?;
 
-        log_debug(&format!("[{}] Fetching {} entries from API", DB_NAME, ids.len()));
-        let batch = super::fetcher::batch_fetch::<Outfit>(
-            &client,
-            "/outfits",
-            &ids,
-            &|fetched, total| {
+        log_debug(&format!(
+            "[{}] Fetching {} entries from API",
+            DB_NAME,
+            ids.len()
+        ));
+        let batch =
+            super::fetcher::batch_fetch::<Outfit>(&client, "/outfits", &ids, &|fetched, total| {
                 let mut db = DB.lock();
                 db.progress = Some((fetched, total));
-            },
-        )
-        .await;
+            })
+            .await;
 
         if let Some(err) = batch.error {
             if batch.entries.is_empty() {
                 return Err(err);
             }
-            log_error(&format!("[{}] Partial fetch ({} entries): {}", DB_NAME, batch.entries.len(), err));
+            log_error(&format!(
+                "[{}] Partial fetch ({} entries): {}",
+                DB_NAME,
+                batch.entries.len(),
+                err
+            ));
         }
 
         Ok::<Vec<Outfit>, String>(batch.entries)
@@ -244,7 +291,11 @@ fn fetch_from_api() {
     let mut db = DB.lock();
     match result {
         Ok(entries) => {
-            log_debug(&format!("[{}] API fetch complete, {} entries. Saving cache...", DB_NAME, entries.len()));
+            log_debug(&format!(
+                "[{}] API fetch complete, {} entries. Saving cache...",
+                DB_NAME,
+                entries.len()
+            ));
             super::save_to_cache(CACHE_FILE, &entries);
             db.entries = entries;
             db.status = DbStatus::Loaded;

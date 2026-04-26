@@ -12,6 +12,10 @@ pub struct UserConfig {
     pub batch_size: i32,
     #[serde(default)]
     pub show_id_prefix: bool,
+    #[serde(default)]
+    pub auto_update_item_db_on_load: bool,
+    #[serde(default)]
+    pub fast_rebuild_item_db: bool,
 }
 
 fn default_link_type_index() -> usize { 0 }
@@ -23,6 +27,8 @@ impl Default for UserConfig {
             link_type_index: 0,
             batch_size: 50,
             show_id_prefix: false,
+            auto_update_item_db_on_load: false,
+            fast_rebuild_item_db: false,
         }
     }
 }
@@ -33,6 +39,8 @@ pub struct RuntimeConfig {
     pub start_id: i32,
     pub batch_size: i32,
     pub show_id_prefix: bool,
+    pub auto_update_item_db_on_load: bool,
+    pub fast_rebuild_item_db: bool,
 }
 
 impl Default for RuntimeConfig {
@@ -43,6 +51,8 @@ impl Default for RuntimeConfig {
             start_id: LinkType::ALL[0].default_start() as i32,
             batch_size: 50,
             show_id_prefix: false,
+            auto_update_item_db_on_load: false,
+            fast_rebuild_item_db: false,
         }
     }
 }
@@ -64,6 +74,8 @@ pub fn load_user_config() {
             rt.link_type_index = cfg.link_type_index.min(LinkType::ALL.len() - 1);
             rt.batch_size = cfg.batch_size;
             rt.show_id_prefix = cfg.show_id_prefix;
+            rt.auto_update_item_db_on_load = cfg.auto_update_item_db_on_load;
+            rt.fast_rebuild_item_db = cfg.fast_rebuild_item_db;
             rt.start_id = LinkType::ALL[rt.link_type_index].default_start() as i32;
             *USER_CONFIG.lock() = cfg;
         }
@@ -83,6 +95,8 @@ pub fn save_user_config() {
             link_type_index: rt.link_type_index,
             batch_size: rt.batch_size,
             show_id_prefix: rt.show_id_prefix,
+            auto_update_item_db_on_load: rt.auto_update_item_db_on_load,
+            fast_rebuild_item_db: rt.fast_rebuild_item_db,
         }
     };
 

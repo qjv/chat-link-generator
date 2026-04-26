@@ -5,9 +5,9 @@ use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use super::{DbEntry, DbStatus, GenericDatabase, log_debug, log_error};
+use super::{log_debug, log_error, DbEntry, DbStatus, GenericDatabase};
 
-const CACHE_FILE: &str = "db_pois.json";
+const CACHE_FILE: &str = "db_api_pois.json";
 const GW2_API_BASE: &str = "https://api.guildwars2.com/v2";
 const CONTINENT_IDS: &[u32] = &[1, 2]; // Tyria, Mists
 const DB_NAME: &str = "pois";
@@ -108,8 +108,15 @@ pub static DB: Lazy<Mutex<GenericDatabase<Poi>>> =
 pub fn ensure_loaded() {
     {
         let db = DB.lock();
-        log_debug(&format!("[{}] ensure_loaded - status: {:?}", DB_NAME, status_str(db.status)));
-        if matches!(db.status, DbStatus::Loading | DbStatus::Loaded | DbStatus::Updating) {
+        log_debug(&format!(
+            "[{}] ensure_loaded - status: {:?}",
+            DB_NAME,
+            status_str(db.status)
+        ));
+        if matches!(
+            db.status,
+            DbStatus::Loading | DbStatus::Loaded | DbStatus::Updating
+        ) {
             return;
         }
     }
@@ -123,7 +130,11 @@ pub fn ensure_loaded() {
         let result = std::panic::catch_unwind(|| {
             if let Some(entries) = super::load_from_cache::<Poi>(CACHE_FILE) {
                 if !entries.is_empty() {
-                    log_debug(&format!("[{}] Loaded {} entries from cache", DB_NAME, entries.len()));
+                    log_debug(&format!(
+                        "[{}] Loaded {} entries from cache",
+                        DB_NAME,
+                        entries.len()
+                    ));
                     let mut db = DB.lock();
                     db.entries = entries;
                     db.status = DbStatus::Loaded;
@@ -147,7 +158,10 @@ pub fn rebuild() {
     {
         let mut db = DB.lock();
         if matches!(db.status, DbStatus::Loading | DbStatus::Updating) {
-            log_debug(&format!("[{}] rebuild skipped - already loading/updating", DB_NAME));
+            log_debug(&format!(
+                "[{}] rebuild skipped - already loading/updating",
+                DB_NAME
+            ));
             return;
         }
         db.status = DbStatus::Loading;
@@ -155,7 +169,10 @@ pub fn rebuild() {
         db.error_msg.clear();
         db.progress = None;
     }
-    log_debug(&format!("[{}] Deleting cache and starting rebuild", DB_NAME));
+    log_debug(&format!(
+        "[{}] Deleting cache and starting rebuild",
+        DB_NAME
+    ));
     super::delete_cache(CACHE_FILE);
 
     std::thread::spawn(move || {
@@ -178,7 +195,10 @@ pub fn update() {
     {
         let db = DB.lock();
         if matches!(db.status, DbStatus::Loading | DbStatus::Updating) {
-            log_debug(&format!("[{}] update skipped - already loading/updating", DB_NAME));
+            log_debug(&format!(
+                "[{}] update skipped - already loading/updating",
+                DB_NAME
+            ));
             return;
         }
         if db.status != DbStatus::Loaded {
@@ -216,7 +236,10 @@ fn fetch_from_api() {
     let rt = match rt {
         Ok(rt) => rt,
         Err(e) => {
-            log_error(&format!("[{}] Failed to create tokio runtime: {}", DB_NAME, e));
+            log_error(&format!(
+                "[{}] Failed to create tokio runtime: {}",
+                DB_NAME, e
+            ));
             let mut db = DB.lock();
             db.error_msg = e.to_string();
             db.status = DbStatus::Error;
@@ -234,23 +257,40 @@ fn fetch_from_api() {
         let mut continent_floors: Vec<(u32, Vec<i32>)> = Vec::new();
         for &cid in CONTINENT_IDS {
             let url = format!("{}/continents/{}/floors", GW2_API_BASE, cid);
-            log_debug(&format!("[{}] Fetching floor IDs for continent {}", DB_NAME, cid));
+            log_debug(&format!(
+                "[{}] Fetching floor IDs for continent {}",
+                DB_NAME, cid
+            ));
             let resp = client.get(&url).send().await.map_err(|e| {
-                let msg = format!("[{}] HTTP error fetching floors for continent {}: {}", DB_NAME, cid, e);
+                let msg = format!(
+                    "[{}] HTTP error fetching floors for continent {}: {}",
+                    DB_NAME, cid, e
+                );
                 log_error(&msg);
                 e.to_string()
             })?;
             let floor_ids: Vec<i32> = resp.json().await.map_err(|e| {
-                let msg = format!("[{}] Parse error for continent {} floors: {}", DB_NAME, cid, e);
+                let msg = format!(
+                    "[{}] Parse error for continent {} floors: {}",
+                    DB_NAME, cid, e
+                );
                 log_error(&msg);
                 e.to_string()
             })?;
-            log_debug(&format!("[{}] Continent {} has {} floors", DB_NAME, cid, floor_ids.len()));
+            log_debug(&format!(
+                "[{}] Continent {} has {} floors",
+                DB_NAME,
+                cid,
+                floor_ids.len()
+            ));
             floors_total += floor_ids.len();
             continent_floors.push((cid, floor_ids));
         }
 
-        log_debug(&format!("[{}] Traversing {} total floors", DB_NAME, floors_total));
+        log_debug(&format!(
+            "[{}] Traversing {} total floors",
+            DB_NAME, floors_total
+        ));
 
         // Traverse each floor
         for (cid, floor_ids) in &continent_floors {
@@ -260,10 +300,7 @@ fn fetch_from_api() {
                     return Err("[pois] Aborted: plugin is unloading".to_string());
                 }
 
-                let url = format!(
-                    "{}/continents/{}/floors/{}",
-                    GW2_API_BASE, cid, fid
-                );
+                let url = format!("{}/continents/{}/floors/{}", GW2_API_BASE, cid, fid);
 
                 let resp = client.get(&url).send().await;
                 if let Ok(resp) = resp {
@@ -283,7 +320,11 @@ fn fetch_from_api() {
             }
         }
 
-        log_debug(&format!("[{}] Traversal complete, {} unique POIs found", DB_NAME, all_pois.len()));
+        log_debug(&format!(
+            "[{}] Traversal complete, {} unique POIs found",
+            DB_NAME,
+            all_pois.len()
+        ));
 
         let mut entries: Vec<Poi> = all_pois.into_values().collect();
         entries.sort_by_key(|p| p.id);
@@ -294,7 +335,11 @@ fn fetch_from_api() {
     let mut db = DB.lock();
     match result {
         Ok(entries) => {
-            log_debug(&format!("[{}] Fetch complete, {} entries. Saving cache...", DB_NAME, entries.len()));
+            log_debug(&format!(
+                "[{}] Fetch complete, {} entries. Saving cache...",
+                DB_NAME,
+                entries.len()
+            ));
             super::save_to_cache(CACHE_FILE, &entries);
             db.entries = entries;
             db.status = DbStatus::Loaded;
@@ -320,7 +365,10 @@ fn fetch_and_merge() {
     let rt = match rt {
         Ok(rt) => rt,
         Err(e) => {
-            log_error(&format!("[{}] Failed to create tokio runtime: {}", DB_NAME, e));
+            log_error(&format!(
+                "[{}] Failed to create tokio runtime: {}",
+                DB_NAME, e
+            ));
             let mut db = DB.lock();
             db.status = DbStatus::Loaded;
             return;
@@ -408,18 +456,11 @@ fn extract_pois_from_floor(floor: &FloorResponse, pois: &mut HashMap<u32, Poi>) 
                     continue;
                 };
 
-                if !matches!(
-                    poi_type,
-                    "waypoint" | "landmark" | "vista" | "unlock"
-                ) {
+                if !matches!(poi_type, "waypoint" | "landmark" | "vista" | "unlock") {
                     continue;
                 }
 
-                let name = raw_poi
-                    .name
-                    .as_deref()
-                    .unwrap_or("")
-                    .to_string();
+                let name = raw_poi.name.as_deref().unwrap_or("").to_string();
 
                 if name.is_empty() {
                     continue;
@@ -441,7 +482,10 @@ pub fn search(query: &str, filter_index: usize, max_results: usize) -> Vec<(u32,
         return Vec::new();
     }
     let query_lower = query.to_lowercase();
-    let filter = PoiFilter::ALL.get(filter_index).copied().unwrap_or(PoiFilter::All);
+    let filter = PoiFilter::ALL
+        .get(filter_index)
+        .copied()
+        .unwrap_or(PoiFilter::All);
     db.entries
         .iter()
         .filter(|e| filter.matches(e) && e.matches_search(&query_lower))

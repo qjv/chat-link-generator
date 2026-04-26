@@ -19,10 +19,7 @@ const MAX_RETRIES: u32 = 3;
 const RETRY_DELAY_MS: u64 = 1000;
 
 /// Fetch all IDs from an endpoint (e.g. `/v2/items` returns `[1,2,3,...]`).
-pub async fn fetch_all_ids(
-    client: &reqwest::Client,
-    endpoint: &str,
-) -> Result<Vec<u32>, String> {
+pub async fn fetch_all_ids(client: &reqwest::Client, endpoint: &str) -> Result<Vec<u32>, String> {
     let url = format!("{}{}", GW2_API_BASE, endpoint);
     super::log_debug(&format!("[fetcher] Fetching IDs from {}", url));
     let resp = client.get(&url).send().await.map_err(|e| {
@@ -41,7 +38,11 @@ pub async fn fetch_all_ids(
         super::log_error(&msg);
         e.to_string()
     })?;
-    super::log_debug(&format!("[fetcher] Got {} IDs from {}", ids.len(), endpoint));
+    super::log_debug(&format!(
+        "[fetcher] Got {} IDs from {}",
+        ids.len(),
+        endpoint
+    ));
     Ok(ids)
 }
 
@@ -85,9 +86,16 @@ pub async fn batch_fetch<T: DeserializeOwned>(
             if attempt > 0 {
                 super::log_debug(&format!(
                     "[fetcher] Retry {}/{} for batch {}/{} of {}",
-                    attempt, MAX_RETRIES - 1, i + 1, num_batches, endpoint
+                    attempt,
+                    MAX_RETRIES - 1,
+                    i + 1,
+                    num_batches,
+                    endpoint
                 ));
-                tokio::time::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS * (attempt as u64))).await;
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    RETRY_DELAY_MS * (attempt as u64),
+                ))
+                .await;
             }
 
             let resp = match client.get(&url).send().await {
@@ -95,7 +103,10 @@ pub async fn batch_fetch<T: DeserializeOwned>(
                 Err(e) => {
                     last_err = format!(
                         "[fetcher] HTTP error on batch {}/{} for {}: {}",
-                        i + 1, num_batches, endpoint, e
+                        i + 1,
+                        num_batches,
+                        endpoint,
+                        e
                     );
                     continue;
                 }
@@ -105,7 +116,10 @@ pub async fn batch_fetch<T: DeserializeOwned>(
             if !status.is_success() {
                 last_err = format!(
                     "[fetcher] Non-200 status {} on batch {}/{} for {}",
-                    status, i + 1, num_batches, endpoint
+                    status,
+                    i + 1,
+                    num_batches,
+                    endpoint
                 );
                 continue;
             }
@@ -119,7 +133,10 @@ pub async fn batch_fetch<T: DeserializeOwned>(
                 Err(e) => {
                     last_err = format!(
                         "[fetcher] Parse error on batch {}/{} for {}: {}",
-                        i + 1, num_batches, endpoint, e
+                        i + 1,
+                        num_batches,
+                        endpoint,
+                        e
                     );
                 }
             }
@@ -142,7 +159,8 @@ pub async fn batch_fetch<T: DeserializeOwned>(
 
     super::log_debug(&format!(
         "[fetcher] batch_fetch {} complete - {} entries",
-        endpoint, results.len()
+        endpoint,
+        results.len()
     ));
     BatchResult {
         entries: results,
@@ -186,9 +204,16 @@ pub async fn batch_fetch_lenient<T: DeserializeOwned>(
             if attempt > 0 {
                 super::log_debug(&format!(
                     "[fetcher] Retry {}/{} for batch {}/{} of {}",
-                    attempt, MAX_RETRIES - 1, i + 1, num_batches, endpoint
+                    attempt,
+                    MAX_RETRIES - 1,
+                    i + 1,
+                    num_batches,
+                    endpoint
                 ));
-                tokio::time::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS * (attempt as u64))).await;
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    RETRY_DELAY_MS * (attempt as u64),
+                ))
+                .await;
             }
 
             let resp = match client.get(&url).send().await {
@@ -196,7 +221,11 @@ pub async fn batch_fetch_lenient<T: DeserializeOwned>(
                 Err(e) => {
                     super::log_debug(&format!(
                         "[fetcher] HTTP error on batch {}/{} for {} (attempt {}): {}",
-                        i + 1, num_batches, endpoint, attempt + 1, e
+                        i + 1,
+                        num_batches,
+                        endpoint,
+                        attempt + 1,
+                        e
                     ));
                     continue;
                 }
@@ -205,7 +234,11 @@ pub async fn batch_fetch_lenient<T: DeserializeOwned>(
             if !resp.status().is_success() {
                 super::log_debug(&format!(
                     "[fetcher] Non-200 status {} on batch {}/{} for {} (attempt {})",
-                    resp.status(), i + 1, num_batches, endpoint, attempt + 1
+                    resp.status(),
+                    i + 1,
+                    num_batches,
+                    endpoint,
+                    attempt + 1
                 ));
                 continue;
             }
@@ -219,7 +252,11 @@ pub async fn batch_fetch_lenient<T: DeserializeOwned>(
                 Err(e) => {
                     super::log_debug(&format!(
                         "[fetcher] Parse error on batch {}/{} for {} (attempt {}): {}",
-                        i + 1, num_batches, endpoint, attempt + 1, e
+                        i + 1,
+                        num_batches,
+                        endpoint,
+                        attempt + 1,
+                        e
                     ));
                 }
             }
@@ -228,7 +265,10 @@ pub async fn batch_fetch_lenient<T: DeserializeOwned>(
         if !batch_success {
             super::log_debug(&format!(
                 "[fetcher] Skipping batch {}/{} for {} after {} retries",
-                i + 1, num_batches, endpoint, MAX_RETRIES
+                i + 1,
+                num_batches,
+                endpoint,
+                MAX_RETRIES
             ));
             skipped += chunk.len();
         }
@@ -243,12 +283,15 @@ pub async fn batch_fetch_lenient<T: DeserializeOwned>(
     if skipped > 0 {
         super::log_debug(&format!(
             "[fetcher] batch_fetch_lenient {} complete - {} entries, {} IDs skipped",
-            endpoint, results.len(), skipped
+            endpoint,
+            results.len(),
+            skipped
         ));
     } else {
         super::log_debug(&format!(
             "[fetcher] batch_fetch_lenient {} complete - {} entries",
-            endpoint, results.len()
+            endpoint,
+            results.len()
         ));
     }
     Ok(results)

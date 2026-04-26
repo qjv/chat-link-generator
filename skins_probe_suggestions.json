@@ -1,0 +1,399 @@
+{
+  "summary": {
+    "feature_count_total": 218,
+    "feature_count_covered": 54,
+    "coverage_percent": 24.77,
+    "stratified": true
+  },
+  "input_quality": {
+    "rows": 10240,
+    "flags_missing_pct": 1.45,
+    "rarity_missing_pct": 0.0
+  },
+  "warning": null,
+  "suggested_ids": [
+    {
+      "id": 12344,
+      "name": "Ocean's Heart Fishing Rod",
+      "type": "Gathering",
+      "rarity": "Basic",
+      "flags": [
+        "NoCost",
+        "ShowInWardrobe",
+        "HideIfLocked"
+      ],
+      "details_type": "Fishing",
+      "covers": [
+        "type=Gathering|details=Fishing|rarity=Basic|flag:HideIfLocked",
+        "type=Gathering|details=Fishing|rarity=Basic|flag:NoCost",
+        "type=Gathering|details=Fishing|rarity=Basic|flag:ShowInWardrobe"
+      ]
+    },
+    {
+      "id": 12586,
+      "name": "Holy Barrage Mining Tool",
+      "type": "Gathering",
+      "rarity": "Basic",
+      "flags": [
+        "NoCost",
+        "ShowInWardrobe",
+        "HideIfLocked"
+      ],
+      "details_type": "Mining",
+      "covers": [
+        "type=Gathering|details=Mining|rarity=Basic|flag:HideIfLocked",
+        "type=Gathering|details=Mining|rarity=Basic|flag:NoCost",
+        "type=Gathering|details=Mining|rarity=Basic|flag:ShowInWardrobe"
+      ]
+    },
+    {
+      "id": 12588,
+      "name": "Holy Barrage Logging Tool",
+      "type": "Gathering",
+      "rarity": "Basic",
+      "flags": [
+        "NoCost",
+        "ShowInWardrobe",
+        "HideIfLocked"
+      ],
+      "details_type": "Logging",
+      "covers": [
+        "type=Gathering|details=Logging|rarity=Basic|flag:HideIfLocked",
+        "type=Gathering|details=Logging|rarity=Basic|flag:NoCost",
+        "type=Gathering|details=Logging|rarity=Basic|flag:ShowInWardrobe"
+      ]
+    },
+    {
+      "id": 12592,
+      "name": "Holy Barrage Harvesting Tool",
+      "type": "Gathering",
+      "rarity": "Basic",
+      "flags": [
+        "NoCost",
+        "ShowInWardrobe",
+        "HideIfLocked"
+      ],
+      "details_type": "Foraging",
+      "covers": [
+        "type=Gathering|details=Foraging|rarity=Basic|flag:HideIfLocked",
+        "type=Gathering|details=Foraging|rarity=Basic|flag:NoCost",
+        "type=Gathering|details=Foraging|rarity=Basic|flag:ShowInWardrobe"
+      ]
+    },
+    {
+      "id": 756,
+      "name": "Radiant Mantle",
+      "type": "Armor",
+      "rarity": "Basic",
+      "flags": [
+        "NoCost",
+        "ShowInWardrobe"
+      ],
+      "details_type": "Shoulders",
+      "covers": [
+        "type=Armor|details=Shoulders|rarity=Basic|flag:NoCost",
+        "type=Armor|details=Shoulders|rarity=Basic|flag:ShowInWardrobe"
+      ]
+    },
+    {
+      "id": 757,
+      "name": "Radiant Greaves",
+      "type": "Armor",
+      "rarity": "Basic",
+      "flags": [
+        "NoCost",
+        "ShowInWardrobe"
+      ],
+      "details_type": "Boots",
+      "covers": [
+        "type=Armor|details=Boots|rarity=Basic|flag:NoCost",
+        "type=Armor|details=Boots|rarity=Basic|flag:ShowInWardrobe"
+      ]
+    },
+    {
+      "id": 758,
+      "name": "Radiant Warhelm",
+      "type": "Armor",
+      "rarity": "Basic",
+      "flags": [
+        "NoCost",
+        "ShowInWardrobe"
+      ],
+      "details_type": "Helm",
+      "covers": [
+        "type=Armor|details=Helm|rarity=Basic|flag:NoCost",
+        "type=Armor|details=Helm|rarity=Basic|flag:ShowInWardrobe"
+      ]
+    },
+    {
+      "id": 759,
+      "name": "Radiant Vambraces",
+      "type": "Armor",
+      "rarity": "Basic",
+      "flags": [
+        "NoCost",
+        "ShowInWardrobe"
+      ],
+      "details_type": "Gloves",
+      "covers": [
+        "type=Armor|details=Gloves|rarity=Basic|flag:NoCost",
+        "type=Armor|details=Gloves|rarity=Basic|flag:ShowInWardrobe"
+      ]
+    },
+    {
+      "id": 796,
+      "name": "Heritage Legguards",
+      "type": "Armor",
+      "rarity": "Basic",
+      "flags": [
+        "NoCost",
+        "ShowInWardrobe"
+      ],
+      "details_type": "Leggings",
+      "covers": [
+        "type=Armor|details=Leggings|rarity=Basic|flag:NoCost",
+        "type=Armor|details=Leggings|rarity=Basic|flag:ShowInWardrobe"
+      ]
+    },
+    {
+      "id": 806,
+      "name": "Heritage Jerkin",
+      "type": "Armor",
+      "rarity": "Basic",
+      "flags": [
+        "NoCost",
+        "ShowInWardrobe"
+      ],
+      "details_type": "Coat",
+      "covers": [
+        "type=Armor|details=Coat|rarity=Basic|flag:NoCost",
+        "type=Armor|details=Coat|rarity=Basic|flag:ShowInWardrobe"
+      ]
+    },
+    {
+      "id": 3835,
+      "name": "Zenith Ward",
+      "type": "Weapon",
+      "rarity": "Basic",
+      "flags": [
+        "NoCost",
+        "ShowInWardrobe"
+      ],
+      "details_type": "Shield",
+      "covers": [
+        "type=Weapon|details=Shield|rarity=Basic|flag:NoCost",
+        "type=Weapon|details=Shield|rarity=Basic|flag:ShowInWardrobe"
+      ]
+    },
+    {
+      "id": 3836,
+      "name": "Zenith Scroll",
+      "type": "Weapon",
+      "rarity": "Basic",
+      "flags": [
+        "NoCost",
+        "ShowInWardrobe"
+      ],
+      "details_type": "Focus",
+      "covers": [
+        "type=Weapon|details=Focus|rarity=Basic|flag:NoCost",
+        "type=Weapon|details=Focus|rarity=Basic|flag:ShowInWardrobe"
+      ]
+    },
+    {
+      "id": 3837,
+      "name": "Zenith Cesta",
+      "type": "Weapon",
+      "rarity": "Basic",
+      "flags": [
+        "NoCost",
+        "ShowInWardrobe"
+      ],
+      "details_type": "Scepter",
+      "covers": [
+        "type=Weapon|details=Scepter|rarity=Basic|flag:NoCost",
+        "type=Weapon|details=Scepter|rarity=Basic|flag:ShowInWardrobe"
+      ]
+    },
+    {
+      "id": 3838,
+      "name": "Zenith Short Bow",
+      "type": "Weapon",
+      "rarity": "Basic",
+      "flags": [
+        "NoCost",
+        "ShowInWardrobe"
+      ],
+      "details_type": "Shortbow",
+      "covers": [
+        "type=Weapon|details=Shortbow|rarity=Basic|flag:NoCost",
+        "type=Weapon|details=Shortbow|rarity=Basic|flag:ShowInWardrobe"
+      ]
+    },
+    {
+      "id": 3839,
+      "name": "Zenith Recurve Bow",
+      "type": "Weapon",
+      "rarity": "Basic",
+      "flags": [
+        "NoCost",
+        "ShowInWardrobe"
+      ],
+      "details_type": "Longbow",
+      "covers": [
+        "type=Weapon|details=Longbow|rarity=Basic|flag:NoCost",
+        "type=Weapon|details=Longbow|rarity=Basic|flag:ShowInWardrobe"
+      ]
+    },
+    {
+      "id": 3840,
+      "name": "Zenith Mace",
+      "type": "Weapon",
+      "rarity": "Basic",
+      "flags": [
+        "NoCost",
+        "ShowInWardrobe"
+      ],
+      "details_type": "Mace",
+      "covers": [
+        "type=Weapon|details=Mace|rarity=Basic|flag:NoCost",
+        "type=Weapon|details=Mace|rarity=Basic|flag:ShowInWardrobe"
+      ]
+    },
+    {
+      "id": 3841,
+      "name": "Zenith Avenger",
+      "type": "Weapon",
+      "rarity": "Basic",
+      "flags": [
+        "NoCost",
+        "ShowInWardrobe"
+      ],
+      "details_type": "Greatsword",
+      "covers": [
+        "type=Weapon|details=Greatsword|rarity=Basic|flag:NoCost",
+        "type=Weapon|details=Greatsword|rarity=Basic|flag:ShowInWardrobe"
+      ]
+    },
+    {
+      "id": 3842,
+      "name": "Zenith Wake",
+      "type": "Weapon",
+      "rarity": "Basic",
+      "flags": [
+        "NoCost",
+        "ShowInWardrobe"
+      ],
+      "details_type": "Speargun",
+      "covers": [
+        "type=Weapon|details=Speargun|rarity=Basic|flag:NoCost",
+        "type=Weapon|details=Speargun|rarity=Basic|flag:ShowInWardrobe"
+      ]
+    },
+    {
+      "id": 3843,
+      "name": "Zenith Impaler",
+      "type": "Weapon",
+      "rarity": "Basic",
+      "flags": [
+        "NoCost",
+        "ShowInWardrobe"
+      ],
+      "details_type": "Spear",
+      "covers": [
+        "type=Weapon|details=Spear|rarity=Basic|flag:NoCost",
+        "type=Weapon|details=Spear|rarity=Basic|flag:ShowInWardrobe"
+      ]
+    },
+    {
+      "id": 3844,
+      "name": "Zenith Reaver",
+      "type": "Weapon",
+      "rarity": "Basic",
+      "flags": [
+        "NoCost",
+        "ShowInWardrobe"
+      ],
+      "details_type": "Axe",
+      "covers": [
+        "type=Weapon|details=Axe|rarity=Basic|flag:NoCost",
+        "type=Weapon|details=Axe|rarity=Basic|flag:ShowInWardrobe"
+      ]
+    },
+    {
+      "id": 3845,
+      "name": "Zenith Harbinger",
+      "type": "Weapon",
+      "rarity": "Basic",
+      "flags": [
+        "NoCost",
+        "ShowInWardrobe"
+      ],
+      "details_type": "Warhorn",
+      "covers": [
+        "type=Weapon|details=Warhorn|rarity=Basic|flag:NoCost",
+        "type=Weapon|details=Warhorn|rarity=Basic|flag:ShowInWardrobe"
+      ]
+    },
+    {
+      "id": 3846,
+      "name": "Zenith Trident",
+      "type": "Weapon",
+      "rarity": "Basic",
+      "flags": [
+        "NoCost",
+        "ShowInWardrobe"
+      ],
+      "details_type": "Trident",
+      "covers": [
+        "type=Weapon|details=Trident|rarity=Basic|flag:NoCost",
+        "type=Weapon|details=Trident|rarity=Basic|flag:ShowInWardrobe"
+      ]
+    },
+    {
+      "id": 3847,
+      "name": "Zenith Flame",
+      "type": "Weapon",
+      "rarity": "Basic",
+      "flags": [
+        "NoCost",
+        "ShowInWardrobe"
+      ],
+      "details_type": "Torch",
+      "covers": [
+        "type=Weapon|details=Torch|rarity=Basic|flag:NoCost",
+        "type=Weapon|details=Torch|rarity=Basic|flag:ShowInWardrobe"
+      ]
+    },
+    {
+      "id": 3848,
+      "name": "Zenith Pistol",
+      "type": "Weapon",
+      "rarity": "Basic",
+      "flags": [
+        "NoCost",
+        "ShowInWardrobe"
+      ],
+      "details_type": "Pistol",
+      "covers": [
+        "type=Weapon|details=Pistol|rarity=Basic|flag:NoCost",
+        "type=Weapon|details=Pistol|rarity=Basic|flag:ShowInWardrobe"
+      ]
+    },
+    {
+      "id": 3849,
+      "name": "Zenith Rifle",
+      "type": "Weapon",
+      "rarity": "Basic",
+      "flags": [
+        "NoCost",
+        "ShowInWardrobe"
+      ],
+      "details_type": "Rifle",
+      "covers": [
+        "type=Weapon|details=Rifle|rarity=Basic|flag:NoCost",
+        "type=Weapon|details=Rifle|rarity=Basic|flag:ShowInWardrobe"
+      ]
+    }
+  ]
+}
