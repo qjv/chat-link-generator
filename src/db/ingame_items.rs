@@ -63,7 +63,7 @@ const DECODE_TEXT_PATTERN: &str =
     "48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 49 8B E8 48 8B F2 48 8B F9 48 85 C9 75 19";
 
 const MAX_IDS_FALLBACK: u32 = 2_000_000;
-const BATCH_PER_TICK: usize = 12;
+const ITEM_SCAN_PER_TICK: usize = 192;
 const DECODES_PER_TICK: usize = 12;
 const GAME_DATA_PER_TICK: usize = 24;
 const MAP_GAME_DATA_PER_TICK: usize = 1;
@@ -73,7 +73,6 @@ const NAME_SAVE_INTERVAL_MS: u64 = 2000;
 const GAME_DATA_SAVE_EVERY: usize = 2000;
 const GAME_DATA_COOLDOWN_MS: u64 = 3;
 const MAP_GAME_DATA_COOLDOWN_MS: u64 = 16;
-const INVALID_STREAK_STOP: u32 = 100;
 const NAME_DECODE_COOLDOWN_MS: u64 = 5;
 const NAME_DECODE_MAX_RETRIES: u8 = 10;
 const WARDROBE_NAME_DECODE_MAX_RETRIES: u8 = 64;
@@ -209,10 +208,10 @@ enum NameParsePhase {
 
 struct ScanJob {
     mode: JobMode,
-    start_id: u32,
     current_id: u32,
     end_id: u32,
     miss_streak: u32,
+    processed: usize,
 }
 
 struct NameParseJob {
@@ -1181,14 +1180,11 @@ pub fn update() {
     let (api_ids, api_names) = load_api_index();
     s.api_ids = api_ids;
     s.api_names = api_names;
-    let max_existing = s.entries.iter().map(|e| e.id).max().unwrap_or(0);
-    let start = max_existing.saturating_add(1).max(1);
-
     s.error_msg.clear();
     s.progress = Some((0, 0));
     s.status = DbStatus::Updating;
 
-    start_job(&mut s, JobMode::Update, start);
+    start_job(&mut s, JobMode::Update, 0);
 }
 
 pub fn maybe_auto_update_on_load() {
@@ -1392,7 +1388,7 @@ pub fn tick() {
             return;
         };
 
-        let (get_content_by_index, _, _) = unsafe {
+        let (_, count_defs, iterate_content_defs) = unsafe {
             match resolve_content_vfuncs(content_ctx) {
                 Some(v) => v,
                 None => {
@@ -1402,19 +1398,36 @@ pub fn tick() {
             }
         };
 
-        let total = job.end_id.saturating_sub(job.start_id).saturating_add(1) as usize;
+        let total = unsafe { count_defs(content_ctx, ITEM_CONTENT_TYPE) }.max(0) as usize;
+        if total == 0 {
+            finalize_job(&mut s, job);
+            return;
+        }
+        job.end_id = total as u32;
 
-        for _ in 0..BATCH_PER_TICK {
-            if job.current_id > job.end_id {
+        let mut exhausted = false;
+        for _ in 0..ITEM_SCAN_PER_TICK {
+            if job.processed >= total {
                 break;
             }
 
-            let idx = job.current_id;
-            let item_ptr = unsafe { get_content_by_index(content_ctx, ITEM_CONTENT_TYPE, idx) };
-
-            if !item_ptr.is_null() {
-                if let Some((entry, content_index, name_hash, description_hash, upgrade_name_hash, base_upgrade_item_id)) =
-                    unsafe { read_item_entry(&s, item_ptr, idx) }
+            let item_ptr = unsafe {
+                iterate_content_defs(
+                    content_ctx,
+                    ITEM_CONTENT_TYPE,
+                    &mut job.current_id as *mut u32,
+                )
+            };
+            if item_ptr.is_null() {
+                exhausted = true;
+                break;
+            }
+            job.processed = job.processed.saturating_add(1);
+            if let Some((entry, content_index, name_hash, description_hash, upgrade_name_hash, base_upgrade_item_id)) =
+                unsafe { read_item_entry(&s, item_ptr, 0) }
+            {
+                if matches!(job.mode, JobMode::Rebuild)
+                    || !s.entry_index.contains_key(&entry.id)
                 {
                     s.upsert_entry(
                         entry,
@@ -1424,29 +1437,15 @@ pub fn tick() {
                         upgrade_name_hash,
                         base_upgrade_item_id,
                     );
-                    job.miss_streak = 0;
-                } else {
-                    job.miss_streak = job.miss_streak.saturating_add(1);
                 }
             } else {
                 job.miss_streak = job.miss_streak.saturating_add(1);
             }
-
-            job.current_id = job.current_id.saturating_add(1);
-
-            if job.miss_streak >= INVALID_STREAK_STOP {
-                break;
-            }
         }
 
-        let done = job.current_id > job.end_id || job.miss_streak >= INVALID_STREAK_STOP;
+        let done = exhausted || job.processed >= total;
 
-        let processed = job
-            .current_id
-            .saturating_sub(job.start_id)
-            .min(job.end_id.saturating_sub(job.start_id).saturating_add(1))
-            as usize;
-        s.progress = Some((processed, total));
+        s.progress = Some((job.processed.min(total), total));
 
         if done {
             finalize_job(&mut s, job);
@@ -2567,21 +2566,15 @@ fn start_job(state: &mut State, mode: JobMode, start_id: u32) {
     ensure_scan_pointers(state);
 
     let suggested_end = unsafe { suggest_end_id_from_content_count(state) };
-    let api_max = state.api_ids.iter().copied().max().unwrap_or(0);
-    let max_known = state.entries.iter().map(|e| e.id).max().unwrap_or(0);
 
-    let end_id = suggested_end
-        .max(api_max.saturating_add(5_000))
-        .max(max_known.saturating_add(5_000))
-        .max(start_id.saturating_add(5_000))
-        .min(MAX_IDS_FALLBACK);
+    let end_id = suggested_end.max(1);
 
     state.scan = Some(ScanJob {
         mode,
-        start_id,
         current_id: start_id,
         end_id,
         miss_streak: 0,
+        processed: 0,
     });
 
     db::log_debug(&format!(
@@ -3266,6 +3259,9 @@ unsafe fn read_item_entry(
 
     let id = (item_ptr.add(ITEM_DEF_ID) as *const u32).read_unaligned();
     let id = if id == 0 { fallback_id } else { id };
+    if id == 0 {
+        return None;
+    }
 
     let content_type = (item_ptr.add(CONTENT_DEF_TYPE) as *const u32).read_unaligned();
     if content_type != ITEM_CONTENT_TYPE {
@@ -3273,9 +3269,6 @@ unsafe fn read_item_entry(
     }
 
     let content_index = (item_ptr.add(CONTENT_DEF_INDEX) as *const u32).read_unaligned();
-    if content_index != fallback_id {
-        return None;
-    }
 
     let item_type_code = (item_ptr.add(ITEM_DEF_TYPE) as *const u32).read_unaligned();
     let rarity_code = (item_ptr.add(ITEM_DEF_RARITY) as *const u32).read_unaligned();
@@ -3315,7 +3308,7 @@ unsafe fn read_item_entry(
             chat_link: encoder::generate_batch_link(encoder::LinkType::Item, id),
             in_api: state.api_ids.contains(&id),
         },
-        fallback_id,
+        content_index,
         name_hash,
         description_hash,
         upgrade_name_hash,

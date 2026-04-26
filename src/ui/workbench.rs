@@ -1,8 +1,8 @@
 use std::borrow::Cow;
 
 use nexus::imgui::{
-    Condition, Drag, InputText, InputTextFlags, MouseButton, Selectable, StyleColor, TableFlags,
-    Ui, Window,
+    Condition, Drag, InputText, InputTextFlags, MouseButton, Selectable, StyleColor,
+    TableColumnFlags, TableColumnSetup, TableFlags, Ui, Window,
 };
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
@@ -184,14 +184,7 @@ fn render_status_chip(
 
 fn render_browse_tab(ui: &Ui) {
     let mut refresh = false;
-    let mut load_api = false;
-    let mut update_api = false;
-    let mut rebuild_api = false;
-    let mut update_game = false;
-    let mut rebuild_game = false;
-    let mut parse_names = false;
-
-    {
+    let (api_action, game_action, names_action) = {
         let mut st = WORKBENCH_STATE.lock();
         let type_names: Vec<&str> = LinkType::ALL.iter().map(|t| t.name()).collect();
         ui.set_next_item_width(190.0);
@@ -257,75 +250,60 @@ fn render_browse_tab(ui: &Ui) {
             refresh = true;
         }
         ui.same_line();
-        if ui.small_button("Load API##browse") {
-            load_api = true;
-        }
+        let api_action = ui.small_button("API##browse_api");
         ui.same_line();
-        if ui.small_button("Update API##browse") {
-            update_api = true;
-        }
+        let game_action = ui.small_button("Game##browse_game");
         ui.same_line();
-        if ui.small_button("Rebuild API##browse") {
-            rebuild_api = true;
-        }
+        let names_action = ui.small_button("Names##browse_names");
         ui.same_line();
-        if ui.small_button("Update Game##browse") {
-            update_game = true;
-        }
-        ui.same_line();
-        if ui.small_button("Rebuild Game##browse") {
-            rebuild_game = true;
-        }
-        ui.same_line();
-        if ui.small_button("Parse Names##browse") {
-            parse_names = true;
-        }
-    }
+        ui.text_disabled("Ctrl-click API/Game/Names to rebuild from zero");
+        (api_action, game_action, names_action)
+    };
 
     let link_type = {
         let st = WORKBENCH_STATE.lock();
         LinkType::ALL[st.selected_type]
     };
+    let ctrl = ui.io().key_ctrl;
 
-    if load_api {
-        db::ensure_loaded(link_type);
+    if api_action {
+        if ctrl {
+            db::rebuild(link_type);
+        } else {
+            db::update(link_type);
+        }
         refresh = true;
     }
-    if update_api {
-        db::update(link_type);
-        refresh = true;
-    }
-    if rebuild_api {
-        db::rebuild(link_type);
-        refresh = true;
-    }
-    if update_game {
+    if game_action {
         if link_type == LinkType::Item {
             let (status, count, _, _) = db::ingame_items::get_status();
-            if matches!(status, DbStatus::NotLoaded) || count == 0 {
+            if ctrl || matches!(status, DbStatus::NotLoaded) || count == 0 {
                 db::ingame_items::rebuild();
             } else {
                 db::ingame_items::update();
             }
         } else {
-            db::ingame_items::start_build_game_data_for_link_type(link_type, false);
+            db::ingame_items::start_build_game_data_for_link_type(link_type, ctrl);
         }
         refresh = true;
     }
-    if rebuild_game {
+    if names_action {
         if link_type == LinkType::Item {
-            db::ingame_items::rebuild();
-        } else {
-            db::ingame_items::start_build_game_data_for_link_type(link_type, true);
-        }
-        refresh = true;
-    }
-    if parse_names {
-        if link_type == LinkType::Item {
-            db::ingame_items::parse_names_from_hashes(false, false);
+            if ctrl {
+                db::ingame_items::full_rebuild_names_from_hashes(false, false);
+            } else {
+                db::ingame_items::parse_names_from_hashes(false, false);
+            }
         } else if link_type == LinkType::Map {
-            db::ingame_items::parse_game_type_names_from_hashes(link_type);
-            db::ingame_items::parse_map_names_from_hashes();
+            if ctrl {
+                db::ingame_items::full_rebuild_game_type_names_from_hashes(link_type);
+                db::ingame_items::full_rebuild_map_names_from_hashes();
+            } else {
+                db::ingame_items::parse_game_type_names_from_hashes(link_type);
+                db::ingame_items::parse_map_names_from_hashes();
+            }
+        } else if ctrl {
+            db::ingame_items::full_rebuild_game_type_names_from_hashes(link_type);
         } else {
             db::ingame_items::parse_game_type_names_from_hashes(link_type);
         }
@@ -397,17 +375,27 @@ fn render_browser_table(ui: &Ui) {
         ui.same_line();
         render_page_nav(ui, "browse", &mut st.page, total);
 
-        let flags = TableFlags::BORDERS_INNER_V | TableFlags::ROW_BG | TableFlags::RESIZABLE;
+        let visible = &st.rows[start..end];
+        let widths = catalog_table_widths(ui, visible);
+        let flags = TableFlags::BORDERS_INNER_V
+            | TableFlags::ROW_BG
+            | TableFlags::RESIZABLE
+            | TableFlags::SIZING_STRETCH_PROP;
         if let Some(_table) = ui.begin_table_with_flags("##catalog_table", 6, flags) {
-            ui.table_setup_column("ID");
-            ui.table_setup_column("Name");
-            ui.table_setup_column("API");
-            ui.table_setup_column("Game");
-            ui.table_setup_column("State");
-            ui.table_setup_column("Link");
+            setup_fixed_column(ui, "ID", widths.id);
+            setup_fixed_column(ui, "Type", widths.category);
+            setup_fixed_column(ui, "API", widths.api);
+            ui.table_setup_column_with(TableColumnSetup {
+                name: "Game",
+                flags: TableColumnFlags::WIDTH_STRETCH,
+                init_width_or_weight: 1.0,
+                user_id: 0.into(),
+            });
+            setup_fixed_column(ui, "State", widths.state);
+            setup_fixed_column(ui, "Link", widths.link);
             ui.table_headers_row();
 
-            for row in &st.rows[start..end] {
+            for row in visible {
                 ui.table_next_row();
                 ui.table_next_column();
                 let selected = st.selected_id == row.id;
@@ -423,11 +411,11 @@ fn render_browser_table(ui: &Ui) {
                 }
 
                 ui.table_next_column();
-                ui.text(row.display_name());
+                ui.text(&row.category);
                 ui.table_next_column();
-                ui.text(if row.has_api() { "Yes" } else { "-" });
+                ui.text(row.api_name.as_deref().unwrap_or("-"));
                 ui.table_next_column();
-                ui.text(if row.has_game() { "Yes" } else { "-" });
+                ui.text(row.game_name.as_deref().filter(|n| !n.is_empty()).unwrap_or("-"));
                 ui.table_next_column();
                 render_comparison_label(ui, row.comparison);
                 ui.table_next_column();
@@ -508,6 +496,44 @@ fn render_selected_detail(ui: &Ui) {
             ));
         }
     }
+}
+
+struct CatalogTableWidths {
+    id: f32,
+    category: f32,
+    api: f32,
+    state: f32,
+    link: f32,
+}
+
+fn catalog_table_widths(ui: &Ui, rows: &[CatalogRecord]) -> CatalogTableWidths {
+    let text_width = |text: &str| ui.calc_text_size(text)[0] + 18.0;
+    let mut id = text_width("0000000");
+    let mut category = text_width("Type");
+    let mut api = text_width("API");
+    let mut state = text_width("Different");
+    for row in rows {
+        id = id.max(text_width(&row.id.to_string()));
+        category = category.max(text_width(&row.category));
+        api = api.max(text_width(row.api_name.as_deref().unwrap_or("-")));
+        state = state.max(text_width(row.comparison.label()));
+    }
+    CatalogTableWidths {
+        id,
+        category,
+        api,
+        state,
+        link: text_width("Copy") + 18.0,
+    }
+}
+
+fn setup_fixed_column(ui: &Ui, name: &'static str, width: f32) {
+    ui.table_setup_column_with(TableColumnSetup {
+        name,
+        flags: TableColumnFlags::WIDTH_FIXED,
+        init_width_or_weight: width,
+        user_id: 0.into(),
+    });
 }
 
 fn render_jobs_tab(ui: &Ui) {

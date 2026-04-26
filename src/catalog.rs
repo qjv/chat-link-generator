@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::db::{self, DbStatus};
 use crate::encoder::{self, LinkType};
@@ -97,6 +97,7 @@ pub struct CatalogRecord {
     pub id: u32,
     pub api_name: Option<String>,
     pub game_name: Option<String>,
+    pub category: String,
     pub comparison: ComparisonState,
     pub chat_link: String,
 }
@@ -109,13 +110,6 @@ impl CatalogRecord {
             .unwrap_or("")
     }
 
-    pub fn has_api(&self) -> bool {
-        self.api_name.is_some()
-    }
-
-    pub fn has_game(&self) -> bool {
-        self.game_name.is_some()
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -146,6 +140,11 @@ pub fn source_status(link_type: LinkType) -> SourceStatus {
 pub fn query_records(query: &CatalogQuery) -> Vec<CatalogRecord> {
     let api_rows = if matches!(query.source_view, SourceView::Game | SourceView::MissingApi) {
         Vec::new()
+    } else if query.link_type == LinkType::Item {
+        db::items::all()
+            .into_iter()
+            .map(|item| (item.id, item.name))
+            .collect()
     } else {
         db::search(query.link_type, "", 0, usize::MAX)
     };
@@ -153,6 +152,15 @@ pub fn query_records(query: &CatalogQuery) -> Vec<CatalogRecord> {
         Vec::new()
     } else {
         db::ingame_items::get_game_data_for_link_type(query.link_type, "", usize::MAX)
+    };
+
+    let item_categories = if query.link_type == LinkType::Item {
+        db::items::all()
+            .into_iter()
+            .map(|item| (item.id, item_category(&item.item_type, &item.detail_type)))
+            .collect::<HashMap<_, _>>()
+    } else {
+        HashMap::new()
     };
 
     let mut merged: BTreeMap<u32, (Option<String>, Option<String>)> = BTreeMap::new();
@@ -176,6 +184,9 @@ pub fn query_records(query: &CatalogQuery) -> Vec<CatalogRecord> {
                 }
             }
 
+            let api_name = api_name.map(|name| clean_name(query.link_type, id, &name));
+            let game_name = game_name.map(|name| clean_name(query.link_type, id, &name));
+            let category = record_category(query.link_type, id, &item_categories);
             let comparison = compare_names(api_name.as_deref(), game_name.as_deref());
             let keep = match query.source_view {
                 SourceView::Merged => true,
@@ -191,10 +202,11 @@ pub fn query_records(query: &CatalogQuery) -> Vec<CatalogRecord> {
 
             if !search.is_empty() {
                 let haystack = format!(
-                    "{} {} {}",
+                    "{} {} {} {}",
                     id,
                     api_name.as_deref().unwrap_or(""),
-                    game_name.as_deref().unwrap_or("")
+                    game_name.as_deref().unwrap_or(""),
+                    category
                 )
                 .to_lowercase();
                 if !haystack.contains(&search) {
@@ -207,6 +219,7 @@ pub fn query_records(query: &CatalogQuery) -> Vec<CatalogRecord> {
                 id,
                 api_name,
                 game_name,
+                category,
                 comparison,
                 chat_link: encoder::generate_batch_link(query.link_type, id),
             })
@@ -277,4 +290,57 @@ fn normalize_name(name: &str) -> String {
     }
 
     s
+}
+
+fn clean_name(link_type: LinkType, id: u32, name: &str) -> String {
+    let mut s = normalize_name(name);
+    if link_type == LinkType::Item && s == format!("Item #{}", id) {
+        s.clear();
+    }
+    s
+}
+
+fn record_category(
+    link_type: LinkType,
+    id: u32,
+    item_categories: &HashMap<u32, String>,
+) -> String {
+    if link_type != LinkType::Item {
+        return link_type.name().to_string();
+    }
+    if let Some(category) = item_categories.get(&id) {
+        return category.clone();
+    }
+    db::ingame_items::get_item(id)
+        .map(|item| game_item_type_name(item.item_type_code).to_string())
+        .unwrap_or_else(|| "Item".to_string())
+}
+
+fn item_category(item_type: &str, detail_type: &str) -> String {
+    if detail_type.trim().is_empty() {
+        if item_type.trim().is_empty() {
+            "Item".to_string()
+        } else {
+            item_type.to_string()
+        }
+    } else {
+        format!("{}/{}", item_type, detail_type)
+    }
+}
+
+fn game_item_type_name(code: u32) -> &'static str {
+    match code {
+        0 => "Armor",
+        4 => "Bag",
+        5 => "Consumable",
+        11 => "CraftingMaterial",
+        18 => "Trinket",
+        20 => "Container",
+        23 => "UpgradeComponent",
+        24 => "Weapon",
+        29 => "Back",
+        30 => "Gathering",
+        32 => "MiniPet",
+        _ => "Item",
+    }
 }

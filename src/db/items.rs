@@ -587,6 +587,10 @@ pub fn search(query: &str, filter_index: usize, max_results: usize) -> Vec<(u32,
         .collect()
 }
 
+pub fn all() -> Vec<Item> {
+    DB.lock().entries.clone()
+}
+
 pub fn search_names(query: &str, filter_index: usize, max_results: usize) -> Vec<(u32, String)> {
     let db = DB.lock();
     if db.entries.is_empty() {
