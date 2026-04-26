@@ -844,73 +844,10 @@ pub fn is_name_parse_paused() -> bool {
 }
 
 pub fn start_build_missing_game_data_all_types() {
-    ensure_loaded();
     let mut s = STATE.lock();
-    if has_active_unpaused_job(&s) {
-        return;
-    }
-    clear_paused_jobs(&mut s);
-    ensure_scan_pointers(&mut s);
-
-    let mut tasks = Vec::<GameTypeTask>::new();
-    for &lt in encoder::LinkType::ALL {
-        let Some(content_type) = link_type_to_content_type(lt) else {
-            continue;
-        };
-        let type_name = lt.name().to_string();
-        let existing = s.game_type_data.get(&type_name);
-        for (id, api_name) in load_api_id_name_pairs_for_link_type(lt) {
-            let already_known = if lt == encoder::LinkType::Item {
-                s.entry_index.contains_key(&id)
-            } else {
-                existing.map(|m| m.contains_key(&id)).unwrap_or(false)
-            };
-            if already_known {
-                continue;
-            }
-            tasks.push(GameTypeTask {
-                link_type: lt,
-                content_type,
-                id,
-                api_name,
-            });
-        }
-    }
-
-    tasks.sort_by(|a, b| {
-        a.link_type
-            .name()
-            .cmp(b.link_type.name())
-            .then(a.id.cmp(&b.id))
-    });
-    tasks.dedup_by(|a, b| a.link_type == b.link_type && a.id == b.id);
-
-    if tasks.is_empty() {
-        s.error_msg.clear();
-        return;
-    }
-
-    s.game_type_job = Some(GameTypeBuildJob {
-        tasks,
-        cursor: 0,
-        added: 0,
-        pending_flush: 0,
-        touched_item_cache: false,
-        paused: false,
-        next_step_at: Instant::now(),
-        map_direct_scan: false,
-        map_content_type: 0,
-        map_iter_index: 0,
-        map_processed: 0,
-        map_total: 0,
-        map_api_names: HashMap::new(),
-    });
-    s.status = DbStatus::Updating;
-    s.progress = Some((
-        0,
-        s.game_type_job.as_ref().map(|j| j.tasks.len()).unwrap_or(0),
-    ));
-    s.error_msg.clear();
+    s.error_msg =
+        "All-type game data builds are disabled; build one selected type at a time.".to_string();
+    db::log_error(&format!("{} {}", LOG_PREFIX, s.error_msg));
 }
 
 pub fn start_build_game_data_for_link_type(link_type: encoder::LinkType, full_rebuild: bool) {

@@ -524,10 +524,6 @@ fn render_jobs_tab(ui: &Ui) {
         db::update_all();
     }
     ui.same_line();
-    if ui.small_button("Build Missing Game Data##jobs") {
-        db::ingame_items::start_build_missing_game_data_all_types();
-    }
-    ui.same_line();
     if ui.small_button("Clear All Caches##jobs") {
         db::clear_all_caches();
     }
@@ -537,6 +533,9 @@ fn render_jobs_tab(ui: &Ui) {
     ui.text(format!("Selected type: {}", link_type.name()));
     render_status_line(ui, "API", status.api.clone());
     render_status_line(ui, "Game", status.game.clone());
+    ui.text_disabled(
+        "All-type game-memory builds are disabled. Use Browse > Update Game for one selected type.",
+    );
 
     if let Some((done, total, added, current_type)) =
         db::ingame_items::get_build_missing_game_data_progress()
