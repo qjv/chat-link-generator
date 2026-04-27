@@ -647,7 +647,8 @@ pub fn parse_names_from_hashes(include_api_named: bool, include_descriptions: bo
 }
 
 pub fn full_rebuild_names_from_hashes(include_api_named: bool, include_descriptions: bool) {
-    start_name_parse(true, include_api_named, include_descriptions);
+    reset_item_name_results(include_descriptions);
+    start_name_parse(false, include_api_named, include_descriptions);
 }
 
 pub fn parse_game_type_names_from_hashes(link_type: encoder::LinkType) {
@@ -655,7 +656,8 @@ pub fn parse_game_type_names_from_hashes(link_type: encoder::LinkType) {
 }
 
 pub fn full_rebuild_game_type_names_from_hashes(link_type: encoder::LinkType) {
-    start_game_type_name_parse(link_type, true);
+    reset_game_type_name_results(link_type);
+    start_game_type_name_parse(link_type, false);
 }
 
 pub fn parse_map_names_from_hashes() {
@@ -663,7 +665,67 @@ pub fn parse_map_names_from_hashes() {
 }
 
 pub fn full_rebuild_map_names_from_hashes() {
-    start_map_name_parse(true);
+    reset_map_name_results();
+    start_map_name_parse(false);
+}
+
+fn reset_item_name_results(include_descriptions: bool) {
+    ensure_loaded();
+    let mut s = STATE.lock();
+    if has_active_unpaused_job(&s) {
+        return;
+    }
+
+    s.names.clear();
+    s.name_failed.clear();
+    s.decoded_text_by_hash.clear();
+    for entry in &mut s.entries {
+        entry.name = format!("Item #{}", entry.id);
+        entry.upgrade_name.clear();
+        if include_descriptions {
+            entry.description.clear();
+        }
+    }
+    save_names_cache(&s.names);
+    save_failed_names_cache(&s.name_failed);
+    save_cache(CACHE_FILE, &s.entries);
+}
+
+fn reset_game_type_name_results(link_type: encoder::LinkType) {
+    ensure_loaded();
+    let mut s = STATE.lock();
+    if has_active_unpaused_job(&s) {
+        return;
+    }
+
+    let type_name = link_type.name().to_string();
+    s.decoded_text_by_hash.clear();
+    if let Some(names) = s.game_type_names.get_mut(&type_name) {
+        names.clear();
+    }
+    if let Some(rows) = s.game_type_data.get_mut(&type_name) {
+        for row in rows.values_mut() {
+            row.name = format!("{} #{}", link_type.name(), row.id);
+        }
+    }
+    save_game_type_data_cache(&s.game_type_data, &s.game_type_hashes, &s.game_type_names);
+}
+
+fn reset_map_name_results() {
+    ensure_loaded();
+    let mut s = STATE.lock();
+    if has_active_unpaused_job(&s) {
+        return;
+    }
+
+    let type_name = encoder::LinkType::Map.name().to_string();
+    s.decoded_text_by_hash.clear();
+    if let Some(rows) = s.game_type_data.get_mut(&type_name) {
+        for row in rows.values_mut() {
+            row.map_name.clear();
+        }
+    }
+    save_game_type_data_cache(&s.game_type_data, &s.game_type_hashes, &s.game_type_names);
 }
 
 fn start_name_parse(
@@ -4579,7 +4641,7 @@ unsafe fn decode_text_hash(state: &State, text_hash: u32, prop_ctx: *const u8) -
         return None;
     }
 
-    decode_coded_text(state.pointers.decode_text_fn, coded).or_else(|| read_clean_coded_text(coded))
+    read_clean_coded_text(coded).or_else(|| decode_coded_text(state.pointers.decode_text_fn, coded))
 }
 
 unsafe fn decode_text_hash_with_pointers(
@@ -4611,7 +4673,7 @@ unsafe fn decode_text_hash_with_pointers(
         return None;
     }
 
-    decode_coded_text(pointers.decode_text_fn, coded).or_else(|| read_clean_coded_text(coded))
+    read_clean_coded_text(coded).or_else(|| decode_coded_text(pointers.decode_text_fn, coded))
 }
 
 unsafe fn read_clean_coded_text(coded: *const u16) -> Option<String> {
