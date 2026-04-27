@@ -2573,8 +2573,15 @@ fn start_job(state: &mut State, mode: JobMode, start_id: u32, seed_last_found_id
 
     let start_id = start_id.max(1);
     let last_game_id = seed_last_found_id.max(state.entries.iter().map(|e| e.id).max().unwrap_or(0));
+    let high_item_hint = state
+        .api_ids
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or_else(|| encoder::LinkType::Item.default_start());
+    let frontier = last_game_id.max(high_item_hint);
     let trailing_gap = item_scan_trailing_gap(&state.entries);
-    let end_id = last_game_id
+    let end_id = frontier
         .saturating_add(trailing_gap)
         .max(start_id.saturating_add(trailing_gap));
     let total = end_id.saturating_sub(start_id).saturating_add(1);
@@ -2584,7 +2591,7 @@ fn start_job(state: &mut State, mode: JobMode, start_id: u32, seed_last_found_id
         start_id,
         current_id: start_id,
         end_id,
-        last_found_id: last_game_id,
+        last_found_id: frontier,
         trailing_gap,
         processed: 0,
         added: 0,
