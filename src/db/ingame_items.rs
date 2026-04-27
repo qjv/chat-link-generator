@@ -63,6 +63,8 @@ const DECODE_TEXT_PATTERN: &str =
     "48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 49 8B E8 48 8B F2 48 8B F9 48 85 C9 75 19";
 
 const MAX_IDS_FALLBACK: u32 = 2_000_000;
+const ITEM_SCAN_FORWARD_WINDOW: u32 = 25_000;
+const ITEM_SCAN_MIN_END_ID: u32 = 150_000;
 const ITEM_SCAN_PER_TICK: usize = 12;
 const ITEM_SCAN_BUDGET_MS: u64 = 1;
 const DECODES_PER_TICK: usize = 1;
@@ -1187,8 +1189,7 @@ pub fn update() {
     s.progress = Some((0, 0));
     s.status = DbStatus::Updating;
 
-    let max_existing = s.entries.iter().map(|e| e.id).max().unwrap_or(0);
-    start_job(&mut s, JobMode::Update, max_existing.saturating_add(1));
+    start_job(&mut s, JobMode::Update, 1);
 }
 
 pub fn maybe_auto_update_on_load() {
@@ -2565,7 +2566,13 @@ fn start_job(state: &mut State, mode: JobMode, start_id: u32) {
     ensure_scan_pointers(state);
 
     let start_id = start_id.max(1);
-    let end_id = MAX_IDS_FALLBACK;
+    let last_game_id = state.entries.iter().map(|e| e.id).max().unwrap_or(0);
+    let last_api_id = state.api_ids.iter().copied().max().unwrap_or(0);
+    let frontier = last_game_id.max(last_api_id).max(ITEM_SCAN_MIN_END_ID);
+    let end_id = frontier
+        .saturating_add(ITEM_SCAN_FORWARD_WINDOW)
+        .min(MAX_IDS_FALLBACK)
+        .max(start_id);
     let total = end_id.saturating_sub(start_id).saturating_add(1);
 
     state.scan = Some(ScanJob {
