@@ -65,7 +65,7 @@ const RESOLVE_TEXT_HASH_PATTERN: &str =
 const ITEM_SCAN_BOOTSTRAP_TAIL: u32 = 50_000;
 const ITEM_SCAN_PER_TICK: usize = 12;
 const ITEM_SCAN_BUDGET_MS: u64 = 1;
-const DECODES_PER_TICK: usize = 12;
+const DECODES_PER_TICK: usize = 1;
 const NAME_PARSE_BUDGET_MS: u64 = 1;
 const GAME_DATA_PER_TICK: usize = 24;
 const MAP_GAME_DATA_PER_TICK: usize = 1;
@@ -82,6 +82,10 @@ const WARDROBE_NAME_RESOLVE_ATTEMPTS: usize = 4;
 const GAME_TYPE_NAME_DECODE_MAX_RETRIES: u8 = 2;
 const MAX_TEXT_HASH_VALUE: u32 = 0x0100_0000;
 const GAME_TEXT_RESOLVE_ENABLED: bool = true;
+
+fn live_text_resolve_enabled() -> bool {
+    GAME_TEXT_RESOLVE_ENABLED && RUNTIME_CONFIG.lock().live_text_resolve_enabled
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct InGameItem {
@@ -651,6 +655,14 @@ fn start_name_parse(
     if has_active_unpaused_job(&s) {
         return;
     }
+    if !live_text_resolve_enabled() {
+        s.error_msg =
+            "Live GW2 text resolving is disabled because it can trigger TextParser assertions."
+                .to_string();
+        s.status = DbStatus::Loaded;
+        s.progress = None;
+        return;
+    }
     clear_paused_jobs(&mut s);
     ensure_scan_pointers(&mut s);
     let mut ids: Vec<u32> = s
@@ -673,33 +685,7 @@ fn start_name_parse(
         return;
     }
 
-    let prop_ctx = unsafe {
-        read_prop_ctx(
-            s.pointers.prop_ctx_getter,
-            resolve_main_thread_id(s.pointers.main_thread_match),
-        )
-    };
-    let Some(prop_ctx) = prop_ctx else {
-        s.error_msg = "Waiting for PropContext (must be in-game)".to_string();
-        s.status = DbStatus::Loaded;
-        s.progress = None;
-        return;
-    };
-
-    let tasks: Vec<ItemNameDecodeTask> = ids
-        .into_iter()
-        .filter_map(|id| {
-            let h = s.hashes.get(&id)?;
-            Some(ItemNameDecodeTask {
-                id,
-                name_hash: h.name_hash,
-                description_hash: h.description_hash,
-                upgrade_name_hash: h.upgrade_name_hash,
-                include_description: include_descriptions,
-            })
-        })
-        .collect();
-    let total = tasks.len();
+    let total = ids.len();
     if total == 0 {
         s.error_msg = "No decodable item hashes found.".to_string();
         s.status = DbStatus::Loaded;
@@ -707,17 +693,28 @@ fn start_name_parse(
         return;
     }
 
-    s.name_job = None;
-    s.text_decode_worker_active = true;
+    s.name_job = Some(NameParseJob {
+        ids,
+        cursor: 0,
+        phase: NameParsePhase::All,
+        equipment_failed_ids: Vec::new(),
+        upgrade_failed_ids: Vec::new(),
+        decoded: 0,
+        pending_flush: 0,
+        retry_counts: HashMap::new(),
+        finalized_ids: HashSet::new(),
+        base_total: total,
+        base_finalized: 0,
+        include_descriptions,
+        full_rebuild: include_already_decoded,
+        next_decode_at: Instant::now(),
+        last_flush_at: Instant::now(),
+    });
+    s.text_decode_worker_active = false;
     s.name_parse_paused = false;
     s.error_msg.clear();
     s.status = DbStatus::Updating;
     s.progress = Some((0, total));
-    let pointers = s.pointers;
-    let prop_ctx_addr = prop_ctx as usize;
-    drop(s);
-
-    spawn_item_name_decode_worker(pointers, prop_ctx_addr, tasks, total);
 }
 
 fn start_game_type_name_parse(link_type: encoder::LinkType, include_already_decoded: bool) {
@@ -727,6 +724,14 @@ fn start_game_type_name_parse(link_type: encoder::LinkType, include_already_deco
     }
     let mut s = STATE.lock();
     if has_active_unpaused_job(&s) {
+        return;
+    }
+    if !live_text_resolve_enabled() {
+        s.error_msg =
+            "Live GW2 text resolving is disabled because it can trigger TextParser assertions."
+                .to_string();
+        s.status = DbStatus::Loaded;
+        s.progress = None;
         return;
     }
     clear_paused_jobs(&mut s);
@@ -778,35 +783,14 @@ fn start_game_type_name_parse(link_type: encoder::LinkType, include_already_deco
         return;
     }
 
-    let prop_ctx = unsafe {
-        read_prop_ctx(
-            s.pointers.prop_ctx_getter,
-            resolve_main_thread_id(s.pointers.main_thread_match),
-        )
-    };
-    let Some(prop_ctx) = prop_ctx else {
-        s.error_msg = "Waiting for PropContext (must be in-game)".to_string();
-        s.status = DbStatus::Loaded;
-        s.progress = None;
-        return;
-    };
-
-    let tasks: Vec<GameTypeNameDecodeTask> = ids
-        .into_iter()
-        .filter_map(|id| {
-            let name_hash = s
-                .game_type_hashes
-                .get(&type_name)
-                .and_then(|m| m.get(&id))
-                .map(|h| h.name_hash)
-                .unwrap_or(0);
-            if name_hash == 0 {
-                return None;
-            }
-            Some(GameTypeNameDecodeTask { id, name_hash })
-        })
-        .collect();
-    let total = tasks.len();
+    ids.retain(|id| {
+        s.game_type_hashes
+            .get(&type_name)
+            .and_then(|m| m.get(id))
+            .map(|h| h.name_hash != 0)
+            .unwrap_or(false)
+    });
+    let total = ids.len();
     if total == 0 {
         s.error_msg = format!("No decodable {} hashes found.", link_type.name());
         s.status = DbStatus::Loaded;
@@ -814,16 +798,24 @@ fn start_game_type_name_parse(link_type: encoder::LinkType, include_already_deco
         return;
     }
 
-    s.game_type_name_job = None;
-    s.text_decode_worker_active = true;
+    s.game_type_name_job = Some(GameTypeNameParseJob {
+        link_type,
+        ids,
+        cursor: 0,
+        decoded: 0,
+        pending_flush: 0,
+        retry_counts: HashMap::new(),
+        finalized_ids: HashSet::new(),
+        base_total: total,
+        base_finalized: 0,
+        full_rebuild: include_already_decoded,
+        next_decode_at: Instant::now(),
+        last_flush_at: Instant::now(),
+    });
+    s.text_decode_worker_active = false;
     s.error_msg.clear();
     s.status = DbStatus::Updating;
     s.progress = Some((0, total));
-    let pointers = s.pointers;
-    let prop_ctx_addr = prop_ctx as usize;
-    drop(s);
-
-    spawn_game_type_name_decode_worker(pointers, prop_ctx_addr, link_type, type_name, tasks, total);
 }
 
 fn start_map_name_parse(include_already_decoded: bool) {
@@ -868,30 +860,25 @@ fn start_map_name_parse(include_already_decoded: bool) {
         return;
     }
 
-    let prop_ctx = unsafe {
-        read_prop_ctx(
-            s.pointers.prop_ctx_getter,
-            resolve_main_thread_id(s.pointers.main_thread_match),
-        )
-    };
-    let Some(prop_ctx) = prop_ctx else {
-        s.error_msg = "Waiting for PropContext (must be in-game)".to_string();
-        s.status = DbStatus::Loaded;
-        s.progress = None;
-        return;
-    };
-
     let total = hashes.len();
-    s.map_name_job = None;
-    s.text_decode_worker_active = true;
+    s.map_name_job = Some(MapNameParseJob {
+        hashes,
+        ids_by_hash,
+        cursor: 0,
+        decoded: 0,
+        pending_flush: 0,
+        retry_counts: HashMap::new(),
+        finalized_ids: HashSet::new(),
+        base_total: total,
+        base_finalized: 0,
+        full_rebuild: include_already_decoded,
+        next_decode_at: Instant::now(),
+        last_flush_at: Instant::now(),
+    });
+    s.text_decode_worker_active = false;
     s.error_msg.clear();
     s.status = DbStatus::Updating;
     s.progress = Some((0, total));
-    let pointers = s.pointers;
-    let prop_ctx_addr = prop_ctx as usize;
-    drop(s);
-
-    spawn_map_name_decode_worker(pointers, prop_ctx_addr, hashes, ids_by_hash, total);
 }
 
 pub fn set_name_parse_paused(paused: bool) {
@@ -1038,6 +1025,12 @@ pub fn queue_debug_resolve_offset_for_content_type(
     content_type_override: Option<u32>,
     offset: usize,
 ) -> Result<(), String> {
+    if !live_text_resolve_enabled() {
+        return Err(
+            "Live GW2 text resolving is disabled because it can trigger TextParser assertions."
+                .to_string(),
+        );
+    }
     ensure_loaded();
     let mut s = STATE.lock();
     ensure_scan_pointers(&mut s);
@@ -1056,6 +1049,12 @@ pub fn queue_debug_resolve_hash(
     source_ptr: Option<u64>,
 ) -> Result<(), String> {
     ensure_loaded();
+    if !live_text_resolve_enabled() && source_ptr.is_none() {
+        return Err(
+            "Live GW2 text resolving is disabled; probe subdef rows with adjacent CodedText can still decode without it."
+                .to_string(),
+        );
+    }
     let mut s = STATE.lock();
     ensure_scan_pointers(&mut s);
     // Replace any pending debug resolve request to keep UI responsive.
@@ -4560,22 +4559,19 @@ unsafe fn decode_text_hash_with_pointers(
     text_hash: u32,
     prop_ctx: *const u8,
 ) -> Option<String> {
+    let _ = prop_ctx;
     if !is_plausible_text_hash(text_hash)
         || pointers.resolve_text_hash_fn.is_null()
         || !is_executable(pointers.resolve_text_hash_fn as *const u8)
+        || !live_text_resolve_enabled()
+        || read_prop_ctx(pointers.prop_ctx_getter, None).is_none()
     {
         return None;
     }
 
     type ResolveTextHashFn = unsafe extern "C" fn(u32, u32) -> *const u16;
     let resolve: ResolveTextHashFn = std::mem::transmute(pointers.resolve_text_hash_fn);
-    let run_resolve = || resolve(text_hash, 0);
-    let coded = if !pointers.prop_ctx_getter.is_null() {
-        with_prop_ctx_installed(pointers.prop_ctx_getter, prop_ctx, run_resolve)
-            .unwrap_or(std::ptr::null())
-    } else {
-        run_resolve()
-    };
+    let coded = resolve(text_hash, 0);
     if coded.is_null() {
         return None;
     }
@@ -4584,7 +4580,8 @@ unsafe fn decode_text_hash_with_pointers(
 }
 
 unsafe fn resolve_coded_text_ptr(state: &State, text_hash: u32, prop_ctx: *const u8) -> *const u16 {
-    if !GAME_TEXT_RESOLVE_ENABLED {
+    let _ = prop_ctx;
+    if !live_text_resolve_enabled() {
         let _ = (state, text_hash, prop_ctx);
         return std::ptr::null();
     }
@@ -4594,16 +4591,13 @@ unsafe fn resolve_coded_text_ptr(state: &State, text_hash: u32, prop_ctx: *const
     if !is_executable(state.pointers.resolve_text_hash_fn as *const u8) {
         return std::ptr::null();
     }
+    if unsafe { read_prop_ctx(state.pointers.prop_ctx_getter, None) }.is_none() {
+        return std::ptr::null();
+    }
 
     type ResolveTextHashFn = unsafe extern "C" fn(u32, u32) -> *const u16;
     let resolve: ResolveTextHashFn = std::mem::transmute(state.pointers.resolve_text_hash_fn);
-    let run_resolve = || resolve(text_hash, 0);
-    if !state.pointers.prop_ctx_getter.is_null() {
-        with_prop_ctx_installed(state.pointers.prop_ctx_getter, prop_ctx, run_resolve)
-            .unwrap_or(std::ptr::null())
-    } else {
-        run_resolve()
-    }
+    resolve(text_hash, 0)
 }
 
 unsafe fn wide_string_len_checked(ptr: *const u16, max_len: usize) -> Option<usize> {

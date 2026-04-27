@@ -16,10 +16,15 @@ pub struct UserConfig {
     pub auto_update_item_db_on_load: bool,
     #[serde(default)]
     pub fast_rebuild_item_db: bool,
+    #[serde(default = "default_live_text_resolve_enabled")]
+    pub live_text_resolve_enabled: bool,
 }
 
 fn default_link_type_index() -> usize { 0 }
 fn default_batch_size() -> i32 { 50 }
+fn default_live_text_resolve_enabled() -> bool {
+    true
+}
 
 impl Default for UserConfig {
     fn default() -> Self {
@@ -29,6 +34,7 @@ impl Default for UserConfig {
             show_id_prefix: false,
             auto_update_item_db_on_load: false,
             fast_rebuild_item_db: false,
+            live_text_resolve_enabled: true,
         }
     }
 }
@@ -41,6 +47,7 @@ pub struct RuntimeConfig {
     pub show_id_prefix: bool,
     pub auto_update_item_db_on_load: bool,
     pub fast_rebuild_item_db: bool,
+    pub live_text_resolve_enabled: bool,
 }
 
 impl Default for RuntimeConfig {
@@ -53,6 +60,7 @@ impl Default for RuntimeConfig {
             show_id_prefix: false,
             auto_update_item_db_on_load: false,
             fast_rebuild_item_db: false,
+            live_text_resolve_enabled: true,
         }
     }
 }
@@ -76,6 +84,7 @@ pub fn load_user_config() {
             rt.show_id_prefix = cfg.show_id_prefix;
             rt.auto_update_item_db_on_load = cfg.auto_update_item_db_on_load;
             rt.fast_rebuild_item_db = cfg.fast_rebuild_item_db;
+            rt.live_text_resolve_enabled = cfg.live_text_resolve_enabled;
             rt.start_id = LinkType::ALL[rt.link_type_index].default_start() as i32;
             *USER_CONFIG.lock() = cfg;
         }
@@ -97,6 +106,7 @@ pub fn save_user_config() {
             show_id_prefix: rt.show_id_prefix,
             auto_update_item_db_on_load: rt.auto_update_item_db_on_load,
             fast_rebuild_item_db: rt.fast_rebuild_item_db,
+            live_text_resolve_enabled: rt.live_text_resolve_enabled,
         }
     };
 

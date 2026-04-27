@@ -32,6 +32,10 @@ pub fn render_settings(ui: &Ui) {
         "Auto-update In-Game Item DB on load",
         &mut cfg.auto_update_item_db_on_load,
     );
+    ui.checkbox(
+        "Unsafe live GW2 text resolving",
+        &mut cfg.live_text_resolve_enabled,
+    );
 
     // Drop cfg lock before calling db functions
     drop(cfg);
