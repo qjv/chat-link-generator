@@ -65,7 +65,7 @@ const DECODE_TEXT_PATTERN: &str =
 const ITEM_SCAN_BOOTSTRAP_TAIL: u32 = 50_000;
 const ITEM_SCAN_PER_TICK: usize = 12;
 const ITEM_SCAN_BUDGET_MS: u64 = 1;
-const DECODES_PER_TICK: usize = 1;
+const DECODES_PER_TICK: usize = 12;
 const NAME_PARSE_BUDGET_MS: u64 = 1;
 const GAME_DATA_PER_TICK: usize = 24;
 const MAP_GAME_DATA_PER_TICK: usize = 1;
@@ -75,11 +75,12 @@ const NAME_SAVE_INTERVAL_MS: u64 = 2000;
 const GAME_DATA_SAVE_EVERY: usize = 2000;
 const GAME_DATA_COOLDOWN_MS: u64 = 3;
 const MAP_GAME_DATA_COOLDOWN_MS: u64 = 16;
-const NAME_DECODE_COOLDOWN_MS: u64 = 5;
+const NAME_DECODE_COOLDOWN_MS: u64 = 1;
 const NAME_DECODE_MAX_RETRIES: u8 = 10;
 const WARDROBE_NAME_DECODE_MAX_RETRIES: u8 = 64;
 const WARDROBE_NAME_RESOLVE_ATTEMPTS: usize = 4;
 const GAME_TYPE_NAME_DECODE_MAX_RETRIES: u8 = 3;
+const MAX_TEXT_HASH_VALUE: u32 = 0x0100_0000;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct InGameItem {
@@ -547,10 +548,7 @@ pub fn ensure_loaded() {
             for (k, rows) in snapshot {
                 for row in rows {
                     if row.name_hash != 0 {
-                        s.game_type_hashes
-                            .entry(k.clone())
-                            .or_default()
-                            .insert(
+                        s.game_type_hashes.entry(k.clone()).or_default().insert(
                             row.id,
                             ItemHashEntry {
                                 id: row.id,
@@ -567,10 +565,7 @@ pub fn ensure_loaded() {
                         if is_unresolved_decoded_text(&row.name) {
                             continue;
                         }
-                        s.game_type_names
-                            .entry(k.clone())
-                            .or_default()
-                            .insert(
+                        s.game_type_names.entry(k.clone()).or_default().insert(
                             row.id,
                             ItemNameEntry {
                                 id: row.id,
@@ -743,7 +738,10 @@ fn start_game_type_name_parse(link_type: encoder::LinkType, include_already_deco
     ids.dedup();
 
     if ids.is_empty() {
-        s.error_msg = format!("No saved {} hashes found. Build hashes first.", link_type.name());
+        s.error_msg = format!(
+            "No saved {} hashes found. Build hashes first.",
+            link_type.name()
+        );
         s.status = if s.entries.is_empty() {
             DbStatus::NotLoaded
         } else {
@@ -836,7 +834,10 @@ fn start_map_name_parse(include_already_decoded: bool) {
     });
     s.error_msg.clear();
     s.status = DbStatus::Updating;
-    s.progress = Some((0, s.map_name_job.as_ref().map(|j| j.base_total).unwrap_or(0)));
+    s.progress = Some((
+        0,
+        s.map_name_job.as_ref().map(|j| j.base_total).unwrap_or(0),
+    ));
 }
 
 pub fn set_name_parse_paused(paused: bool) {
@@ -1022,8 +1023,7 @@ pub fn consume_debug_resolve_result() -> Option<Result<DebugResolveResult, Strin
 fn is_unresolved_decoded_text(text: &str) -> bool {
     let t = text.trim();
     t.is_empty()
-        || t
-            .chars()
+        || t.chars()
             .all(|c| c == '?' || c == '？' || c == '\u{FFFD}' || c.is_whitespace())
 }
 
@@ -1045,6 +1045,10 @@ fn is_retryable_parse_name(name: &str) -> bool {
         }
     }
     t.starts_with("Category #")
+}
+
+fn is_plausible_text_hash(hash: u32) -> bool {
+    (4..MAX_TEXT_HASH_VALUE).contains(&hash)
 }
 
 pub fn debug_is_known_hash_for_type(link_type: encoder::LinkType, hash: u32) -> bool {
@@ -1158,7 +1162,9 @@ fn should_decode_game_type_name_id(
         .and_then(|m| m.get(&id))
         .map(|n| n.name.as_str())
     {
-        if !is_retryable_parse_name(saved_name) && !is_generic_placeholder_name(saved_name, link_type) {
+        if !is_retryable_parse_name(saved_name)
+            && !is_generic_placeholder_name(saved_name, link_type)
+        {
             return false;
         }
     }
@@ -1168,7 +1174,9 @@ fn should_decode_game_type_name_id(
         .and_then(|m| m.get(&id))
         .map(|e| e.name.as_str())
     {
-        if !is_retryable_parse_name(existing_name) && !is_generic_placeholder_name(existing_name, link_type) {
+        if !is_retryable_parse_name(existing_name)
+            && !is_generic_placeholder_name(existing_name, link_type)
+        {
             return false;
         }
     }
@@ -1245,15 +1253,16 @@ pub fn tick() {
     // Prioritize debug resolve jobs so UI actions are not starved by long parse jobs.
     if let Some((link_type, id, content_type_override, offset)) = s.debug_resolve_job.take() {
         let res = (|| unsafe {
-            let default_content_type =
-                link_type_to_content_type(link_type).ok_or_else(|| "Unsupported link type".to_string())?;
+            let default_content_type = link_type_to_content_type(link_type)
+                .ok_or_else(|| "Unsupported link type".to_string())?;
             let content_type = content_type_override.unwrap_or(default_content_type);
 
             let content_ctx = read_ptr(prop_ctx, PROP_CTX_CONTENT_CTX)
                 .ok_or_else(|| "Could not resolve ContentCtx".to_string())?;
 
-            let (get_content_by_index, count_defs, iterate_content_defs) = resolve_content_vfuncs(content_ctx)
-                .ok_or_else(|| "Could not resolve ContentCtx vfuncs".to_string())?;
+            let (get_content_by_index, count_defs, iterate_content_defs) =
+                resolve_content_vfuncs(content_ctx)
+                    .ok_or_else(|| "Could not resolve ContentCtx vfuncs".to_string())?;
 
             let api_name = get_api_name_for_link_type_id(link_type, id);
             let resolved_content_type = content_type;
@@ -1270,15 +1279,22 @@ pub fn tick() {
                 prop_ctx,
             );
             if ptr.is_null() {
-                return Err(format!("No content ptr for type {} id {}", link_type.name(), id));
+                return Err(format!(
+                    "No content ptr for type {} id {}",
+                    link_type.name(),
+                    id
+                ));
             }
 
             if !is_readable(ptr, offset + std::mem::size_of::<u32>()) {
                 return Err(format!("Offset 0x{:X} is not readable", offset));
             }
             let raw_u32 = (ptr.add(offset) as *const u32).read_unaligned();
-            if raw_u32 == 0 {
-                return Err("Value at offset is 0".to_string());
+            if !is_plausible_text_hash(raw_u32) {
+                return Err(format!(
+                    "Value at offset is not a plausible TextHash: {}",
+                    raw_u32
+                ));
             }
 
             let mut decoded_text = None;
@@ -1321,8 +1337,11 @@ pub fn tick() {
 
     if let Some((link_type, id, offset, raw_u32, source_ptr)) = s.debug_resolve_hash_job.take() {
         let res = (|| unsafe {
-            if raw_u32 == 0 {
-                return Err("Selected value is 0".to_string());
+            if !is_plausible_text_hash(raw_u32) {
+                return Err(format!(
+                    "Selected value is not a plausible TextHash: {}",
+                    raw_u32
+                ));
             }
 
             let mut decoded_text = None;
@@ -1354,7 +1373,8 @@ pub fn tick() {
                         let coded_off = offset - 8;
                         if let Some(coded_ptr) = read_ptr(src_ptr, coded_off) {
                             if !coded_ptr.is_null() {
-                                if let Some(text) = read_wide_string(coded_ptr as *const u16, 1024) {
+                                if let Some(text) = read_wide_string(coded_ptr as *const u16, 1024)
+                                {
                                     let t = text.trim().to_string();
                                     if !t.is_empty() {
                                         coded_text = t.clone();
@@ -1370,7 +1390,10 @@ pub fn tick() {
             }
 
             if decoded_text.is_none() && coded_text.is_empty() {
-                return Err("resolve_text_hash/decode_text failed (including coded-text fallback)".to_string());
+                return Err(
+                    "resolve_text_hash/decode_text failed (including coded-text fallback)"
+                        .to_string(),
+                );
             }
 
             Ok(DebugResolveResult {
@@ -1421,16 +1444,20 @@ pub fn tick() {
             if item_ptr.is_null() {
                 continue;
             }
-            if let Some((entry, content_index, name_hash, description_hash, upgrade_name_hash, base_upgrade_item_id)) =
-                unsafe { read_item_entry(&s, item_ptr, id) }
+            if let Some((
+                entry,
+                content_index,
+                name_hash,
+                description_hash,
+                upgrade_name_hash,
+                base_upgrade_item_id,
+            )) = unsafe { read_item_entry(&s, item_ptr, id) }
             {
                 job.last_found_id = job.last_found_id.max(entry.id);
                 job.end_id = job
                     .end_id
                     .max(job.last_found_id.saturating_add(job.trailing_gap));
-                if matches!(job.mode, JobMode::Rebuild)
-                    || !s.entry_index.contains_key(&entry.id)
-                {
+                if matches!(job.mode, JobMode::Rebuild) || !s.entry_index.contains_key(&entry.id) {
                     s.upsert_entry(
                         entry,
                         content_index,
@@ -1494,11 +1521,7 @@ pub fn tick() {
                 continue;
             }
             let name_hash = s.hashes.get(&id).map(|h| h.name_hash).unwrap_or(0);
-            let upgrade_name_hash = s
-                .hashes
-                .get(&id)
-                .map(|h| h.upgrade_name_hash)
-                .unwrap_or(0);
+            let upgrade_name_hash = s.hashes.get(&id).map(|h| h.upgrade_name_hash).unwrap_or(0);
             let item_type_code = s
                 .entry_index
                 .get(&id)
@@ -1521,7 +1544,9 @@ pub fn tick() {
                     .map(|h| h.base_upgrade_item_id)
                     .unwrap_or(0);
                 if fallback_skin_id == 0 || fallback_base_upgrade == 0 {
-                    unsafe { refresh_item_fallback_ids(&mut s, id, content_ctx, get_content_by_index) };
+                    unsafe {
+                        refresh_item_fallback_ids(&mut s, id, content_ctx, get_content_by_index)
+                    };
                 }
             }
             let decoded = if name_hash != 0 {
@@ -1545,35 +1570,28 @@ pub fn tick() {
             let mut name = decoded
                 .map(|n| n.trim().to_string())
                 .filter(|n| !n.is_empty() && !is_unresolved_decoded_text(n));
-            if name.is_none()
-                && can_use_skin_fallback
-                && job.phase == NameParsePhase::Equipment
-            {
+            if name.is_none() && can_use_skin_fallback && job.phase == NameParsePhase::Equipment {
                 let default_skin_id = s
                     .entry_index
                     .get(&id)
                     .and_then(|&idx| s.entries.get(idx))
                     .map(|e| e.default_skin_id)
                     .unwrap_or(0);
-                name = unsafe {
-                    resolve_item_name_fallback_from_skin(
-                        &mut s,
-                        id,
-                        default_skin_id,
-                    )
-                };
+                name = unsafe { resolve_item_name_fallback_from_skin(&mut s, id, default_skin_id) };
             }
 
-            let upgrade_name_fallback_for_name = if name.is_none()
-                && is_upgrade_item
-                && job.phase == NameParsePhase::Upgrade
-            {
-                unsafe {
-                    resolve_upgrade_name_fallback_from_base_upgrade_item(&mut s, id, item_content_access)
-                }
-            } else {
-                None
-            };
+            let upgrade_name_fallback_for_name =
+                if name.is_none() && is_upgrade_item && job.phase == NameParsePhase::Upgrade {
+                    unsafe {
+                        resolve_upgrade_name_fallback_from_base_upgrade_item(
+                            &mut s,
+                            id,
+                            item_content_access,
+                        )
+                    }
+                } else {
+                    None
+                };
 
             if name.is_none() {
                 name = upgrade_name_fallback_for_name;
@@ -1684,9 +1702,9 @@ pub fn tick() {
                 let fallback_upgrade_name = if is_upgrade_item
                     && job.phase == NameParsePhase::Upgrade
                     && decoded_upgrade_name
-                    .as_ref()
-                    .map(|u| u.trim().is_empty() || is_unresolved_decoded_text(u))
-                    .unwrap_or(true)
+                        .as_ref()
+                        .map(|u| u.trim().is_empty() || is_unresolved_decoded_text(u))
+                        .unwrap_or(true)
                 {
                     unsafe {
                         resolve_upgrade_name_fallback_from_base_upgrade_item(
@@ -1728,8 +1746,8 @@ pub fn tick() {
             }
 
             // Persist in checkpoints to reduce render-thread I/O stutter.
-            let flush_due = job.last_flush_at.elapsed()
-                >= Duration::from_millis(NAME_SAVE_INTERVAL_MS);
+            let flush_due =
+                job.last_flush_at.elapsed() >= Duration::from_millis(NAME_SAVE_INTERVAL_MS);
             if job.pending_flush >= NAME_SAVE_EVERY || flush_due {
                 save_names_cache(&s.names);
                 save_failed_names_cache(&s.name_failed);
@@ -1817,14 +1835,23 @@ pub fn tick() {
             read_ptr(prop_ctx, PROP_CTX_CONTENT_CTX).and_then(|content_ctx| {
                 resolve_content_vfuncs(content_ctx).map(
                     |(get_content_by_index, count_defs, iterate_content_defs)| {
-                        (content_ctx, get_content_by_index, count_defs, iterate_content_defs)
+                        (
+                            content_ctx,
+                            get_content_by_index,
+                            count_defs,
+                            iterate_content_defs,
+                        )
                     },
                 )
             })
         };
         let game_type_content_type = link_type_to_content_type(job.link_type).unwrap_or(0);
         let mut steps = 0usize;
+        let parse_started = Instant::now();
         while job.cursor < job.ids.len() && steps < DECODES_PER_TICK.max(1) {
+            if parse_started.elapsed() >= Duration::from_millis(NAME_PARSE_BUDGET_MS) {
+                break;
+            }
             let id = job.ids[job.cursor];
             job.cursor += 1;
             steps += 1;
@@ -1842,7 +1869,8 @@ pub fn tick() {
                 if let Some((content_ctx, get_content_by_index, count_defs, iterate_content_defs)) =
                     game_type_content_access
                 {
-                    let api_name = get_api_name_for_link_type_id(job.link_type, id).unwrap_or_default();
+                    let api_name =
+                        get_api_name_for_link_type_id(job.link_type, id).unwrap_or_default();
                     let ptr = unsafe {
                         get_content_ptr_for_type_id(
                             &mut s,
@@ -1850,7 +1878,11 @@ pub fn tick() {
                             content_ctx,
                             game_type_content_type,
                             id,
-                            if api_name.is_empty() { None } else { Some(&api_name) },
+                            if api_name.is_empty() {
+                                None
+                            } else {
+                                Some(&api_name)
+                            },
                             get_content_by_index,
                             count_defs,
                             iterate_content_defs,
@@ -1901,6 +1933,14 @@ pub fn tick() {
             let decoded = if name_hash != 0 {
                 if let Some(cached) = s.decoded_text_by_hash.get(&name_hash).cloned() {
                     Some(cached)
+                } else if job.link_type == encoder::LinkType::Wardrobe {
+                    let out = unsafe { resolve_text_hash_coded_only(&s, name_hash, prop_ctx) };
+                    if let Some(ref text) = out {
+                        if !text.trim().is_empty() && !is_unresolved_decoded_text(text) {
+                            s.decoded_text_by_hash.insert(name_hash, text.clone());
+                        }
+                    }
+                    out
                 } else {
                     let out = unsafe {
                         decode_text_hash(&s, name_hash, prop_ctx)
@@ -1997,10 +2037,14 @@ pub fn tick() {
                 job.base_finalized = job.base_finalized.saturating_add(1);
             }
 
-            let flush_due = job.last_flush_at.elapsed()
-                >= Duration::from_millis(NAME_SAVE_INTERVAL_MS);
+            let flush_due =
+                job.last_flush_at.elapsed() >= Duration::from_millis(NAME_SAVE_INTERVAL_MS);
             if job.pending_flush >= NAME_SAVE_EVERY || flush_due {
-                save_game_type_data_cache(&s.game_type_data, &s.game_type_hashes, &s.game_type_names);
+                save_game_type_data_cache(
+                    &s.game_type_data,
+                    &s.game_type_hashes,
+                    &s.game_type_names,
+                );
                 job.pending_flush = 0;
                 job.last_flush_at = Instant::now();
             }
@@ -2043,7 +2087,11 @@ pub fn tick() {
         }
         let type_name = encoder::LinkType::Map.name().to_string();
         let mut steps = 0usize;
+        let parse_started = Instant::now();
         while job.cursor < job.hashes.len() && steps < DECODES_PER_TICK.max(1) {
+            if parse_started.elapsed() >= Duration::from_millis(NAME_PARSE_BUDGET_MS) {
+                break;
+            }
             let map_name_hash = job.hashes[job.cursor];
             job.cursor += 1;
             steps += 1;
@@ -2054,7 +2102,10 @@ pub fn tick() {
                 if let Some(cached) = s.decoded_text_by_hash.get(&map_name_hash).cloned() {
                     Some(cached)
                 } else {
-                    let out = unsafe { decode_text_hash(&s, map_name_hash, prop_ctx) };
+                    let out = unsafe {
+                        decode_text_hash(&s, map_name_hash, prop_ctx)
+                            .or_else(|| resolve_text_hash_coded_only(&s, map_name_hash, prop_ctx))
+                    };
                     if let Some(ref text) = out {
                         if !text.trim().is_empty() && !is_unresolved_decoded_text(text) {
                             s.decoded_text_by_hash.insert(map_name_hash, text.clone());
@@ -2106,10 +2157,14 @@ pub fn tick() {
             if job.finalized_ids.insert(map_name_hash) {
                 job.base_finalized = job.base_finalized.saturating_add(1);
             }
-            let flush_due = job.last_flush_at.elapsed()
-                >= Duration::from_millis(NAME_SAVE_INTERVAL_MS);
+            let flush_due =
+                job.last_flush_at.elapsed() >= Duration::from_millis(NAME_SAVE_INTERVAL_MS);
             if job.pending_flush >= NAME_SAVE_EVERY || flush_due {
-                save_game_type_data_cache(&s.game_type_data, &s.game_type_hashes, &s.game_type_names);
+                save_game_type_data_cache(
+                    &s.game_type_data,
+                    &s.game_type_hashes,
+                    &s.game_type_names,
+                );
                 job.pending_flush = 0;
                 job.last_flush_at = Instant::now();
             }
@@ -2229,8 +2284,11 @@ pub fn tick() {
                     )
                 };
                 let (poi_type_code, map_name_hash, map_name) =
-                    unsafe { read_poi_metadata(&mut s, ptr, id, prop_ctx) }
-                        .unwrap_or((0, 0, String::new()));
+                    unsafe { read_poi_metadata(&mut s, ptr, id, prop_ctx) }.unwrap_or((
+                        0,
+                        0,
+                        String::new(),
+                    ));
                 let resolved_name = s
                     .game_type_names
                     .get(&type_name)
@@ -2277,22 +2335,23 @@ pub fn tick() {
                             last_seen_unix: ts,
                         },
                     );
-                s.game_type_names
-                    .entry(type_name)
-                    .or_default()
-                    .insert(
+                s.game_type_names.entry(type_name).or_default().insert(
+                    id,
+                    ItemNameEntry {
                         id,
-                        ItemNameEntry {
-                            id,
-                            name: resolved_name,
-                            last_seen_unix: ts,
-                        },
-                    );
+                        name: resolved_name,
+                        last_seen_unix: ts,
+                    },
+                );
                 job.added = job.added.saturating_add(1);
                 job.pending_flush = job.pending_flush.saturating_add(1);
 
                 if job.pending_flush >= GAME_DATA_SAVE_EVERY {
-                    save_game_type_data_cache(&s.game_type_data, &s.game_type_hashes, &s.game_type_names);
+                    save_game_type_data_cache(
+                        &s.game_type_data,
+                        &s.game_type_hashes,
+                        &s.game_type_names,
+                    );
                     job.pending_flush = 0;
                 }
             }
@@ -2303,7 +2362,11 @@ pub fn tick() {
             s.status = DbStatus::Updating;
             s.progress = Some((job.map_processed, job.map_total.max(job.map_processed)));
             if done {
-                save_game_type_data_cache(&s.game_type_data, &s.game_type_hashes, &s.game_type_names);
+                save_game_type_data_cache(
+                    &s.game_type_data,
+                    &s.game_type_hashes,
+                    &s.game_type_names,
+                );
                 s.game_type_job = None;
                 s.status = if s.entries.is_empty() {
                     DbStatus::NotLoaded
@@ -2350,8 +2413,14 @@ pub fn tick() {
                         )
                     };
                     if !ptr.is_null() {
-                        if let Some((entry, content_index, name_hash, description_hash, upgrade_name_hash, base_upgrade_item_id)) =
-                            unsafe { read_item_entry(&s, ptr, task.id) }
+                        if let Some((
+                            entry,
+                            content_index,
+                            name_hash,
+                            description_hash,
+                            upgrade_name_hash,
+                            base_upgrade_item_id,
+                        )) = unsafe { read_item_entry(&s, ptr, task.id) }
                         {
                             s.upsert_entry(
                                 entry,
@@ -2499,7 +2568,11 @@ pub fn tick() {
                     save_hashes_cache(&s.hashes);
                     job.touched_item_cache = false;
                 }
-                save_game_type_data_cache(&s.game_type_data, &s.game_type_hashes, &s.game_type_names);
+                save_game_type_data_cache(
+                    &s.game_type_data,
+                    &s.game_type_hashes,
+                    &s.game_type_names,
+                );
                 job.pending_flush = 0;
             }
         }
@@ -2537,7 +2610,6 @@ pub fn tick() {
             s.game_type_job = Some(job);
         }
     }
-
 }
 
 pub fn search(query: &str, only_api: bool, max_results: usize) -> Vec<SearchResult> {
@@ -2572,7 +2644,8 @@ fn start_job(state: &mut State, mode: JobMode, start_id: u32, seed_last_found_id
     ensure_scan_pointers(state);
 
     let start_id = start_id.max(1);
-    let last_game_id = seed_last_found_id.max(state.entries.iter().map(|e| e.id).max().unwrap_or(0));
+    let last_game_id =
+        seed_last_found_id.max(state.entries.iter().map(|e| e.id).max().unwrap_or(0));
     let high_item_hint = state
         .api_ids
         .iter()
@@ -2665,7 +2738,9 @@ fn apply_saved_names(state: &mut State) {
 }
 
 fn sanitize_loaded_names(state: &mut State) {
-    state.names.retain(|_, n| !is_unresolved_decoded_text(&n.name));
+    state
+        .names
+        .retain(|_, n| !is_unresolved_decoded_text(&n.name));
     for bucket in state.game_type_names.values_mut() {
         bucket.retain(|_, n| !is_unresolved_decoded_text(&n.name));
     }
@@ -2797,8 +2872,7 @@ pub fn parse_game_data_for_link_type(link_type: encoder::LinkType) {
                 (0, 0, 0)
             };
         let (poi_type_code, map_name_hash, map_name) = if link_type == encoder::LinkType::Map {
-            unsafe { read_poi_metadata(&mut s, ptr, id, prop_ctx) }
-                .unwrap_or((0, 0, String::new()))
+            unsafe { read_poi_metadata(&mut s, ptr, id, prop_ctx) }.unwrap_or((0, 0, String::new()))
         } else {
             (0, 0, String::new())
         };
@@ -2972,7 +3046,11 @@ pub fn debug_probe_content_for_content_type(
         )
     };
     if ptr.is_null() {
-        return Err(format!("No content ptr for type {} id {}", link_type.name(), id));
+        return Err(format!(
+            "No content ptr for type {} id {}",
+            link_type.name(),
+            id
+        ));
     }
 
     if unsafe { !is_readable(ptr, 0x90) } {
@@ -3023,9 +3101,9 @@ pub fn debug_probe_content_for_content_type(
         // - exclude zero/self-id/pointer-like values
         // - stay within learned hash range from gathered data
         // - be slightly more permissive at known name-hash offsets
-        let looks_like_hash_pattern = if raw_u32 == 0 || raw_u32 == id {
+        let looks_like_hash_pattern = if raw_u32 == id {
             false
-        } else if raw_u32 >= 0x0100_0000 {
+        } else if !is_plausible_text_hash(raw_u32) {
             false
         } else if Some(offset) == known_name_offset {
             raw_u32 >= 4 && raw_u32 <= hard_cap
@@ -3107,7 +3185,11 @@ pub fn debug_probe_item_subdef_for_content_type(
         )
     };
     if ptr.is_null() {
-        return Err(format!("No content ptr for type {} id {}", link_type.name(), id));
+        return Err(format!(
+            "No content ptr for type {} id {}",
+            link_type.name(),
+            id
+        ));
     }
 
     let subdef_ptr = unsafe { read_ptr(ptr, ITEM_DEF_SUBDEF) }.unwrap_or(std::ptr::null());
@@ -3123,10 +3205,10 @@ pub fn debug_probe_item_subdef_for_content_type(
         let raw_u32 = unsafe { (subdef_ptr.add(offset) as *const u32).read_unaligned() };
         // Subdef debug should stay strict: only expose known text-hash slots
         // used for upgrade-like subdefs. This avoids noisy false positives.
-        let looks_like_hash = (offset == ITEM_UPGRADE_TEXT_HASH1 || offset == ITEM_UPGRADE_TEXT_HASH2)
-            && raw_u32 != 0
+        let looks_like_hash = (offset == ITEM_UPGRADE_TEXT_HASH1
+            || offset == ITEM_UPGRADE_TEXT_HASH2)
             && raw_u32 != id
-            && raw_u32 < 0x0100_0000;
+            && is_plausible_text_hash(raw_u32);
         rows.push(ContentOffsetProbeRow {
             offset,
             raw_u32,
@@ -3364,13 +3446,19 @@ unsafe fn read_item_upgrade_name_hash(item_ptr: *const u8) -> u32 {
         return 0;
     }
 
-    if is_readable(subdef_ptr, ITEM_UPGRADE_TEXT_HASH1 + std::mem::size_of::<u32>()) {
+    if is_readable(
+        subdef_ptr,
+        ITEM_UPGRADE_TEXT_HASH1 + std::mem::size_of::<u32>(),
+    ) {
         let h1 = (subdef_ptr.add(ITEM_UPGRADE_TEXT_HASH1) as *const u32).read_unaligned();
         if h1 != 0 {
             return h1;
         }
     }
-    if is_readable(subdef_ptr, ITEM_UPGRADE_TEXT_HASH2 + std::mem::size_of::<u32>()) {
+    if is_readable(
+        subdef_ptr,
+        ITEM_UPGRADE_TEXT_HASH2 + std::mem::size_of::<u32>(),
+    ) {
         let h2 = (subdef_ptr.add(ITEM_UPGRADE_TEXT_HASH2) as *const u32).read_unaligned();
         if h2 != 0 {
             return h2;
@@ -3384,7 +3472,10 @@ unsafe fn read_item_base_upgrade_item_id(item_ptr: *const u8) -> u32 {
         return 0;
     };
     if subdef_ptr.is_null()
-        || !is_readable(subdef_ptr, ITEM_UPGRADE_BASE_ITEM_ID + std::mem::size_of::<u32>())
+        || !is_readable(
+            subdef_ptr,
+            ITEM_UPGRADE_BASE_ITEM_ID + std::mem::size_of::<u32>(),
+        )
     {
         return 0;
     }
@@ -3755,7 +3846,9 @@ unsafe fn read_non_item_name_hash(
                 prop_ctx,
             );
             if let Some(off) = discovered {
-                state.discovered_name_hash_offsets.insert(type_name.clone(), off);
+                state
+                    .discovered_name_hash_offsets
+                    .insert(type_name.clone(), off);
             }
             discovered
         });
@@ -3840,7 +3933,7 @@ unsafe fn decode_text_hash_at_offset(
         return None;
     }
     let text_hash = (ptr.add(offset) as *const u32).read_unaligned();
-    if text_hash == 0 {
+    if !is_plausible_text_hash(text_hash) {
         return None;
     }
     let decoded = decode_text_hash(state, text_hash, prop_ctx)?;
@@ -3856,7 +3949,7 @@ unsafe fn resolve_text_hash_coded_only(
     text_hash: u32,
     prop_ctx: *const u8,
 ) -> Option<String> {
-    if text_hash == 0 {
+    if !is_plausible_text_hash(text_hash) {
         return None;
     }
     let coded_ptr = resolve_coded_text_ptr(state, text_hash, prop_ctx);
@@ -3883,8 +3976,8 @@ unsafe fn discover_name_hash_offset_for_link_type(
 ) -> Option<usize> {
     // Candidate offsets for common TextHash fields across content defs.
     const CANDIDATE_OFFSETS: &[usize] = &[
-        0x2C, 0x30, 0x34, 0x38, 0x3C, 0x40, 0x44, 0x48, 0x4C, 0x50, 0x54, 0x58, 0x5C, 0x60,
-        0x64, 0x68, 0x6C, 0x70, 0x74, 0x78, 0x7C, 0x80, 0x84,
+        0x2C, 0x30, 0x34, 0x38, 0x3C, 0x40, 0x44, 0x48, 0x4C, 0x50, 0x54, 0x58, 0x5C, 0x60, 0x64,
+        0x68, 0x6C, 0x70, 0x74, 0x78, 0x7C, 0x80, 0x84,
     ];
 
     let pairs = load_api_id_name_pairs_for_link_type(link_type);
@@ -3903,10 +3996,10 @@ unsafe fn discover_name_hash_offset_for_link_type(
             Some(&api_name),
             get_content_by_index,
             count_defs,
-        iterate_content_defs,
-        prop_ctx,
-        false,
-    );
+            iterate_content_defs,
+            prop_ctx,
+            false,
+        );
         if ptr.is_null() {
             continue;
         }
@@ -3992,9 +4085,7 @@ unsafe fn decode_non_item_name(
                         if let Some(raw) = read_wide_string(coded_ptr, 1024) {
                             let name = raw.trim().to_string();
                             let unresolved = name.is_empty()
-                                || name
-                                    .chars()
-                                    .all(|c| c == '?' || c.is_whitespace());
+                                || name.chars().all(|c| c == '?' || c.is_whitespace());
                             if !unresolved {
                                 return (text_hash, name);
                             }
@@ -4034,7 +4125,9 @@ unsafe fn decode_non_item_name(
                 )
             };
             if let Some(off) = discovered {
-                state.discovered_name_hash_offsets.insert(type_name.clone(), off);
+                state
+                    .discovered_name_hash_offsets
+                    .insert(type_name.clone(), off);
             }
             discovered
         });
@@ -4056,6 +4149,13 @@ unsafe fn decode_coded_text(
     if coded_text.is_null() || state.pointers.decode_text_fn.is_null() {
         return None;
     }
+    if !is_executable(state.pointers.decode_text_fn as *const u8) {
+        return None;
+    }
+    // The game decoder is sensitive to malformed CodedText pointers. Validate
+    // that the input at least looks like a readable, terminated UTF-16 buffer
+    // before handing it back to GW2 code.
+    wide_string_len_checked(coded_text, 2048)?;
 
     type TextCallback = unsafe extern "C" fn(usize, *const u16);
     type DecodeTextFn = unsafe extern "C" fn(*const u16, TextCallback, usize);
@@ -4079,6 +4179,9 @@ unsafe fn decode_coded_text(
 }
 
 unsafe fn decode_text_hash(state: &State, text_hash: u32, prop_ctx: *const u8) -> Option<String> {
+    if !is_plausible_text_hash(text_hash) {
+        return None;
+    }
     let coded = resolve_coded_text_ptr(state, text_hash, prop_ctx);
     if coded.is_null() {
         return None;
@@ -4088,7 +4191,10 @@ unsafe fn decode_text_hash(state: &State, text_hash: u32, prop_ctx: *const u8) -
 }
 
 unsafe fn resolve_coded_text_ptr(state: &State, text_hash: u32, prop_ctx: *const u8) -> *const u16 {
-    if text_hash == 0 || state.pointers.resolve_text_hash_fn.is_null() {
+    if !is_plausible_text_hash(text_hash) || state.pointers.resolve_text_hash_fn.is_null() {
+        return std::ptr::null();
+    }
+    if !is_executable(state.pointers.resolve_text_hash_fn as *const u8) {
         return std::ptr::null();
     }
 
@@ -4103,18 +4209,29 @@ unsafe fn resolve_coded_text_ptr(state: &State, text_hash: u32, prop_ctx: *const
     }
 }
 
+unsafe fn wide_string_len_checked(ptr: *const u16, max_len: usize) -> Option<usize> {
+    if ptr.is_null() || max_len == 0 {
+        return None;
+    }
+
+    for len in 0..max_len {
+        let ch_ptr = ptr.add(len);
+        if !is_readable(ch_ptr as *const u8, std::mem::size_of::<u16>()) {
+            return None;
+        }
+        if *ch_ptr == 0 {
+            return Some(len);
+        }
+    }
+
+    None
+}
+
 unsafe fn read_wide_string(ptr: *const u16, max_len: usize) -> Option<String> {
     if ptr.is_null() || max_len == 0 {
         return None;
     }
-    let mut len = 0usize;
-    while len < max_len {
-        let ch = *ptr.add(len);
-        if ch == 0 {
-            break;
-        }
-        len += 1;
-    }
+    let len = wide_string_len_checked(ptr, max_len)?;
     if len == 0 {
         return Some(String::new());
     }
@@ -4127,10 +4244,9 @@ unsafe extern "C" fn decode_receiver(_ctx: usize, decoded_text: *const u16) {
         return;
     }
 
-    let mut len = 0usize;
-    while len < 2048 && *decoded_text.add(len) != 0 {
-        len += 1;
-    }
+    let Some(len) = wide_string_len_checked(decoded_text, 2048) else {
+        return;
+    };
     if len == 0 {
         return;
     }
@@ -4193,7 +4309,11 @@ type IterateContentDefsFn = unsafe extern "C" fn(*const u8, u32, *mut u32) -> *c
 
 unsafe fn resolve_content_vfuncs(
     content_ctx: *const u8,
-) -> Option<(GetContentByIndexFn, CountContentDefsFn, IterateContentDefsFn)> {
+) -> Option<(
+    GetContentByIndexFn,
+    CountContentDefsFn,
+    IterateContentDefsFn,
+)> {
     let vtable = read_ptr(content_ctx, 0)?;
 
     let get_slot = vtable.add(CONTENT_VT_GET_CONTENT_BY_INDEX);
@@ -4280,8 +4400,8 @@ unsafe fn discover_id_offset_for_link_type(
     }
 
     const CANDIDATE_OFFSETS: &[usize] = &[
-        0x20, 0x24, 0x28, 0x2C, 0x30, 0x34, 0x38, 0x3C, 0x40, 0x44, 0x48, 0x4C, 0x50, 0x54,
-        0x58, 0x5C, 0x60, 0x64, 0x68, 0x6C, 0x70, 0x74, 0x78, 0x7C, 0x80,
+        0x20, 0x24, 0x28, 0x2C, 0x30, 0x34, 0x38, 0x3C, 0x40, 0x44, 0x48, 0x4C, 0x50, 0x54, 0x58,
+        0x5C, 0x60, 0x64, 0x68, 0x6C, 0x70, 0x74, 0x78, 0x7C, 0x80,
     ];
 
     let count = count_defs(content_ctx, content_type).max(0) as u32;
@@ -4319,7 +4439,9 @@ unsafe fn discover_id_offset_for_link_type(
     let mut best: Option<(usize, usize)> = None;
     for (off, score) in scores {
         let better = match best {
-            Some((best_off, best_score)) => score > best_score || (score == best_score && off == 0x28 && best_off != 0x28),
+            Some((best_off, best_score)) => {
+                score > best_score || (score == best_score && off == 0x28 && best_off != 0x28)
+            }
             None => true,
         };
         if better {
@@ -4345,7 +4467,7 @@ unsafe fn resolve_text_hash_at_offset_raw(
         return None;
     }
     let text_hash = (ptr.add(offset) as *const u32).read_unaligned();
-    if text_hash == 0 {
+    if !is_plausible_text_hash(text_hash) {
         return None;
     }
     let coded_ptr = resolve_coded_text_ptr(state, text_hash, prop_ctx);
@@ -4417,9 +4539,9 @@ unsafe fn find_content_ptr_by_any_u32_match(
     count_defs: CountContentDefsFn,
 ) -> *const u8 {
     const CANDIDATE_OFFSETS: &[usize] = &[
-        0x20, 0x24, 0x28, 0x2C, 0x30, 0x34, 0x38, 0x3C, 0x40, 0x44, 0x48, 0x4C, 0x50, 0x54,
-        0x58, 0x5C, 0x60, 0x64, 0x68, 0x6C, 0x70, 0x74, 0x78, 0x7C, 0x80, 0x84, 0x88, 0x8C,
-        0x90, 0x94, 0x98, 0x9C, 0xA0, 0xA4, 0xA8, 0xAC, 0xB0, 0xB4, 0xB8, 0xBC, 0xC0,
+        0x20, 0x24, 0x28, 0x2C, 0x30, 0x34, 0x38, 0x3C, 0x40, 0x44, 0x48, 0x4C, 0x50, 0x54, 0x58,
+        0x5C, 0x60, 0x64, 0x68, 0x6C, 0x70, 0x74, 0x78, 0x7C, 0x80, 0x84, 0x88, 0x8C, 0x90, 0x94,
+        0x98, 0x9C, 0xA0, 0xA4, 0xA8, 0xAC, 0xB0, 0xB4, 0xB8, 0xBC, 0xC0,
     ];
 
     let count = count_defs(content_ctx, content_type).max(0) as u32;
@@ -4561,8 +4683,8 @@ unsafe fn discover_name_offset_from_scan(
     }
 
     const CANDIDATE_OFFSETS: &[usize] = &[
-        0x2C, 0x30, 0x34, 0x38, 0x3C, 0x40, 0x44, 0x48, 0x4C, 0x50, 0x54, 0x58, 0x5C, 0x60,
-        0x64, 0x68, 0x6C, 0x70, 0x74, 0x78, 0x7C, 0x80, 0x84,
+        0x2C, 0x30, 0x34, 0x38, 0x3C, 0x40, 0x44, 0x48, 0x4C, 0x50, 0x54, 0x58, 0x5C, 0x60, 0x64,
+        0x68, 0x6C, 0x70, 0x74, 0x78, 0x7C, 0x80, 0x84,
     ];
 
     let count = count_defs(content_ctx, content_type).max(0) as u32;
@@ -4616,7 +4738,10 @@ unsafe fn discover_name_offset_from_scan(
             Some((best_off, best_matches, best_tested)) => {
                 matches > best_matches
                     || (matches == best_matches && tested > best_tested)
-                    || (matches == best_matches && tested == best_tested && off == 0x64 && best_off != 0x64)
+                    || (matches == best_matches
+                        && tested == best_tested
+                        && off == 0x64
+                        && best_off != 0x64)
             }
             None => true,
         };
@@ -4702,7 +4827,12 @@ unsafe fn get_content_ptr_for_type_id(
     }
 
     let name_offset = known_name_hash_offset_for_link_type(link_type)
-        .or_else(|| state.discovered_name_hash_offsets.get(link_type.name()).copied())
+        .or_else(|| {
+            state
+                .discovered_name_hash_offsets
+                .get(link_type.name())
+                .copied()
+        })
         .or_else(|| {
             let api_names: HashSet<String> = load_api_id_name_pairs_for_link_type(link_type)
                 .into_iter()
@@ -4949,7 +5079,12 @@ unsafe fn read_prop_ctx(fn_ptr: *mut u8, main_thread_id: Option<u32>) -> Option<
         return None;
     }
 
-    let prop_ctx = *(tls_block.add(tls_offset) as *const *const u8);
+    let prop_ctx_slot = tls_block.add(tls_offset);
+    if !is_readable(prop_ctx_slot, std::mem::size_of::<usize>()) {
+        return None;
+    }
+
+    let prop_ctx = *(prop_ctx_slot as *const *const u8);
     if prop_ctx.is_null() || !is_readable(prop_ctx, 0x300) {
         None
     } else {
@@ -5009,11 +5144,30 @@ unsafe fn with_prop_ctx_installed<R>(
         return None;
     }
 
-    let slot = tls_block.add(tls_offset) as *mut *const u8;
+    let slot_ptr = tls_block.add(tls_offset);
+    if !is_readable(slot_ptr, std::mem::size_of::<usize>())
+        || !is_writable(slot_ptr, std::mem::size_of::<usize>())
+    {
+        return None;
+    }
+
+    let slot = slot_ptr as *mut *const u8;
     let original = *slot;
+    struct TlsRestore {
+        slot: *mut *const u8,
+        original: *const u8,
+    }
+    impl Drop for TlsRestore {
+        fn drop(&mut self) {
+            unsafe {
+                *self.slot = self.original;
+            }
+        }
+    }
+
     *slot = prop_ctx;
+    let _restore = TlsRestore { slot, original };
     let out = f();
-    *slot = original;
     Some(out)
 }
 
@@ -5078,7 +5232,7 @@ unsafe fn read_teb_tls_array_of_thread(_thread_id: u32) -> Option<*const *const 
 #[cfg(target_os = "windows")]
 unsafe fn is_readable(ptr: *const u8, size: usize) -> bool {
     use windows::Win32::System::Memory::{
-        VirtualQuery, MEMORY_BASIC_INFORMATION, PAGE_GUARD, PAGE_NOACCESS,
+        VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, PAGE_GUARD, PAGE_NOACCESS,
     };
 
     if ptr.is_null() {
@@ -5096,8 +5250,15 @@ unsafe fn is_readable(ptr: *const u8, size: usize) -> bool {
         return false;
     }
 
-    let region_end = mbi.BaseAddress as usize + mbi.RegionSize;
-    if ptr as usize + size > region_end {
+    if mbi.State != MEM_COMMIT {
+        return false;
+    }
+
+    let region_end = (mbi.BaseAddress as usize).saturating_add(mbi.RegionSize);
+    let Some(read_end) = (ptr as usize).checked_add(size) else {
+        return false;
+    };
+    if read_end > region_end {
         return false;
     }
 
@@ -5111,5 +5272,87 @@ unsafe fn is_readable(ptr: *const u8, size: usize) -> bool {
 
 #[cfg(not(target_os = "windows"))]
 unsafe fn is_readable(_ptr: *const u8, _size: usize) -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+unsafe fn is_writable(ptr: *const u8, size: usize) -> bool {
+    use windows::Win32::System::Memory::{
+        VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, PAGE_EXECUTE_READWRITE,
+        PAGE_EXECUTE_WRITECOPY, PAGE_GUARD, PAGE_NOACCESS, PAGE_READWRITE, PAGE_WRITECOPY,
+    };
+
+    if ptr.is_null() {
+        return false;
+    }
+
+    let mut mbi: MEMORY_BASIC_INFORMATION = std::mem::zeroed();
+    let ret = VirtualQuery(
+        Some(ptr as *const _),
+        &mut mbi,
+        std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+    );
+    if ret == 0 || mbi.State != MEM_COMMIT {
+        return false;
+    }
+
+    let region_end = (mbi.BaseAddress as usize).saturating_add(mbi.RegionSize);
+    let Some(write_end) = (ptr as usize).checked_add(size) else {
+        return false;
+    };
+    if write_end > region_end {
+        return false;
+    }
+
+    let protect = mbi.Protect;
+    if protect.contains(PAGE_NOACCESS) || protect.contains(PAGE_GUARD) {
+        return false;
+    }
+
+    protect.contains(PAGE_READWRITE)
+        || protect.contains(PAGE_WRITECOPY)
+        || protect.contains(PAGE_EXECUTE_READWRITE)
+        || protect.contains(PAGE_EXECUTE_WRITECOPY)
+}
+
+#[cfg(not(target_os = "windows"))]
+unsafe fn is_writable(_ptr: *const u8, _size: usize) -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+unsafe fn is_executable(ptr: *const u8) -> bool {
+    use windows::Win32::System::Memory::{
+        VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, PAGE_EXECUTE, PAGE_EXECUTE_READ,
+        PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY, PAGE_GUARD, PAGE_NOACCESS,
+    };
+
+    if ptr.is_null() {
+        return false;
+    }
+
+    let mut mbi: MEMORY_BASIC_INFORMATION = std::mem::zeroed();
+    let ret = VirtualQuery(
+        Some(ptr as *const _),
+        &mut mbi,
+        std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+    );
+    if ret == 0 || mbi.State != MEM_COMMIT {
+        return false;
+    }
+
+    let protect = mbi.Protect;
+    if protect.contains(PAGE_NOACCESS) || protect.contains(PAGE_GUARD) {
+        return false;
+    }
+
+    protect.contains(PAGE_EXECUTE)
+        || protect.contains(PAGE_EXECUTE_READ)
+        || protect.contains(PAGE_EXECUTE_READWRITE)
+        || protect.contains(PAGE_EXECUTE_WRITECOPY)
+}
+
+#[cfg(not(target_os = "windows"))]
+unsafe fn is_executable(_ptr: *const u8) -> bool {
     false
 }

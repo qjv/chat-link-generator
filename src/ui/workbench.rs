@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::time::{Duration, Instant};
 
 use nexus::imgui::{
     Condition, Drag, InputText, InputTextFlags, MouseButton, Selectable, StyleColor,
@@ -30,6 +31,8 @@ struct WorkbenchState {
     cache_min_id: i32,
     cache_max_id: i32,
     cache_sort: usize,
+    copied_notice: String,
+    copied_at: Option<Instant>,
 }
 
 impl Default for WorkbenchState {
@@ -50,6 +53,8 @@ impl Default for WorkbenchState {
             cache_min_id: -1,
             cache_max_id: -1,
             cache_sort: usize::MAX,
+            copied_notice: String::new(),
+            copied_at: None,
         }
     }
 }
@@ -154,6 +159,31 @@ fn render_top_bar(ui: &Ui) {
             format_number(added)
         ));
     }
+
+    let copied_notice = {
+        let mut st = WORKBENCH_STATE.lock();
+        if st
+            .copied_at
+            .map(|at| at.elapsed() <= Duration::from_secs(3))
+            .unwrap_or(false)
+        {
+            Some(st.copied_notice.clone())
+        } else {
+            st.copied_at = None;
+            None
+        }
+    };
+    if let Some(notice) = copied_notice {
+        ui.same_line();
+        ui.text_disabled(notice);
+    }
+}
+
+fn copy_to_clipboard(ui: &Ui, text: &str, what: &str) {
+    ui.set_clipboard_text(text);
+    let mut st = WORKBENCH_STATE.lock();
+    st.copied_notice = format!("Copied {}", what);
+    st.copied_at = Some(Instant::now());
 }
 
 fn render_status_chip(
@@ -188,9 +218,12 @@ fn render_browse_tab(ui: &Ui) {
         let mut st = WORKBENCH_STATE.lock();
         let type_names: Vec<&str> = LinkType::ALL.iter().map(|t| t.name()).collect();
         ui.set_next_item_width(190.0);
-        if ui.combo("Type##browse_type", &mut st.selected_type, &type_names, |name| {
-            Cow::Borrowed(name)
-        }) {
+        if ui.combo(
+            "Type##browse_type",
+            &mut st.selected_type,
+            &type_names,
+            |name| Cow::Borrowed(name),
+        ) {
             st.page = 0;
         }
 
@@ -416,7 +449,12 @@ fn render_browser_table(ui: &Ui) {
                 ui.table_next_column();
                 ui.text(row.api_name.as_deref().unwrap_or("-"));
                 ui.table_next_column();
-                ui.text(row.game_name.as_deref().filter(|n| !n.is_empty()).unwrap_or("-"));
+                ui.text(
+                    row.game_name
+                        .as_deref()
+                        .filter(|n| !n.is_empty())
+                        .unwrap_or("-"),
+                );
                 ui.table_next_column();
                 render_comparison_label(ui, row.comparison);
                 ui.table_next_column();
@@ -432,7 +470,7 @@ fn render_browser_table(ui: &Ui) {
     }
 
     if let Some(link) = copy_link {
-        ui.set_clipboard_text(link);
+        copy_to_clipboard(ui, &link, "chat link");
     }
 }
 
@@ -449,7 +487,22 @@ fn render_selected_detail(ui: &Ui) {
     ui.text(format!("Selected: {} {}", row.id, row.display_name()));
     ui.same_line();
     if ui.small_button("Copy Link##detail_link") {
-        ui.set_clipboard_text(&row.chat_link);
+        copy_to_clipboard(ui, &row.chat_link, "chat link");
+    }
+    ui.same_line();
+    if ui.small_button("Copy ID##detail_id") {
+        copy_to_clipboard(ui, &row.id.to_string(), "id");
+    }
+    if let Some(name) = row
+        .game_name
+        .as_deref()
+        .filter(|n| !n.trim().is_empty())
+        .or(row.api_name.as_deref())
+    {
+        ui.same_line();
+        if ui.small_button("Copy Name##detail_name") {
+            copy_to_clipboard(ui, name, "name");
+        }
     }
     ui.same_line();
     if ui.small_button("Probe##detail_probe") {
@@ -461,7 +514,11 @@ fn render_selected_detail(ui: &Ui) {
         probe.id = row.id as i32;
     }
 
-    ui.text(format!("Chat Link: {}", row.chat_link));
+    let mut link_preview = row.chat_link.clone();
+    ui.set_next_item_width(-1.0);
+    InputText::new(ui, "Chat Link##detail_link_text", &mut link_preview)
+        .flags(InputTextFlags::READ_ONLY)
+        .build();
     ui.text(format!(
         "API: {}",
         row.api_name.as_deref().unwrap_or("<missing>")
@@ -612,6 +669,7 @@ fn render_probe_tab(ui: &Ui) {
     }
 
     let mut run_probe = false;
+    let mut run_subdef_probe = false;
     let mut run_resolve = false;
     {
         let mut st = PROBE_STATE.lock();
@@ -651,6 +709,10 @@ fn render_probe_tab(ui: &Ui) {
             run_probe = true;
         }
         ui.same_line();
+        if ui.small_button("Probe Subdef##probe_subdef") {
+            run_subdef_probe = true;
+        }
+        ui.same_line();
         if ui.small_button("Resolve Offset##probe_resolve") {
             run_resolve = true;
         }
@@ -665,6 +727,30 @@ fn render_probe_tab(ui: &Ui) {
             None
         };
         match db::ingame_items::debug_probe_content_for_content_type(
+            link_type,
+            st.id.max(0) as u32,
+            content_type,
+        ) {
+            Ok(info) => {
+                st.last_info = Some(info);
+                st.last_error.clear();
+            }
+            Err(err) => {
+                st.last_info = None;
+                st.last_error = err;
+            }
+        }
+    }
+
+    if run_subdef_probe {
+        let mut st = PROBE_STATE.lock();
+        let link_type = LinkType::ALL[st.selected_type];
+        let content_type = if st.use_custom_content_type {
+            Some(st.custom_content_type.max(0) as u32)
+        } else {
+            None
+        };
+        match db::ingame_items::debug_probe_item_subdef_for_content_type(
             link_type,
             st.id.max(0) as u32,
             content_type,
@@ -733,10 +819,20 @@ fn render_probe_results(ui: &Ui) {
         let _c = ui.push_style_color(StyleColor::Text, [1.0, 0.35, 0.35, 1.0]);
         ui.text(format!("Resolve error: {}", resolve_error));
     } else if let Some(result) = resolve {
+        let copy_text = result
+            .decoded_text
+            .as_deref()
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or(&result.coded_text)
+            .to_string();
         ui.text(format!(
             "Resolved 0x{:X}: {} / 0x{:08X}",
             result.offset, result.raw_u32, result.raw_u32
         ));
+        ui.same_line();
+        if ui.small_button("Copy Text##probe_resolved_copy") {
+            copy_to_clipboard(ui, &copy_text, "resolved text");
+        }
         if let Some(text) = result.decoded_text {
             ui.text_wrapped(text);
         } else {
@@ -764,11 +860,13 @@ fn render_probe_results(ui: &Ui) {
     }
 
     let flags = TableFlags::BORDERS_INNER_V | TableFlags::ROW_BG | TableFlags::RESIZABLE;
-    if let Some(_table) = ui.begin_table_with_flags("##probe_offsets", 4, flags) {
+    let mut resolve_hash = None;
+    if let Some(_table) = ui.begin_table_with_flags("##probe_offsets", 5, flags) {
         ui.table_setup_column("Offset");
         ui.table_setup_column("Dec");
         ui.table_setup_column("Hex");
         ui.table_setup_column("Hash");
+        ui.table_setup_column("Resolve");
         ui.table_headers_row();
         let mut clicked_offset = None;
         for row in &info.rows {
@@ -790,9 +888,80 @@ fn render_probe_results(ui: &Ui) {
             } else {
                 ui.text_disabled("-");
             }
+            ui.table_next_column();
+            if row.is_hash_candidate
+                && ui.small_button(&format!("Decode##probe_decode_{:X}", row.offset))
+            {
+                resolve_hash = Some((row.offset, row.raw_u32, info.content_ptr));
+            }
         }
         if let Some(offset) = clicked_offset {
             PROBE_STATE.lock().offset = offset as i32;
+        }
+    }
+
+    if !info.subdef_rows.is_empty() {
+        ui.separator();
+        ui.text(format!("Subdef ptr=0x{:X}", info.subdef_ptr));
+        if let Some(_table) = ui.begin_table_with_flags("##probe_subdef_offsets", 5, flags) {
+            ui.table_setup_column("Offset");
+            ui.table_setup_column("Dec");
+            ui.table_setup_column("Hex");
+            ui.table_setup_column("Hash");
+            ui.table_setup_column("Resolve");
+            ui.table_headers_row();
+            for row in &info.subdef_rows {
+                ui.table_next_row();
+                ui.table_next_column();
+                if Selectable::new(&format!(
+                    "0x{:X}##probe_subdef_off_{:X}",
+                    row.offset, row.offset
+                ))
+                .span_all_columns(true)
+                .build(ui)
+                {
+                    PROBE_STATE.lock().offset = row.offset as i32;
+                }
+                ui.table_next_column();
+                ui.text(row.raw_u32.to_string());
+                ui.table_next_column();
+                ui.text(format!("0x{:08X}", row.raw_u32));
+                ui.table_next_column();
+                if row.is_hash_candidate {
+                    ui.text_colored([0.45, 0.9, 0.55, 1.0], "Yes");
+                } else {
+                    ui.text_disabled("-");
+                }
+                ui.table_next_column();
+                if row.is_hash_candidate
+                    && ui.small_button(&format!("Decode##probe_subdef_decode_{:X}", row.offset))
+                {
+                    resolve_hash = Some((row.offset, row.raw_u32, info.subdef_ptr));
+                }
+            }
+        }
+    }
+
+    if let Some((offset, raw_u32, source_ptr)) = resolve_hash {
+        match db::ingame_items::queue_debug_resolve_hash(
+            info.link_type,
+            info.id,
+            offset,
+            raw_u32,
+            Some(source_ptr),
+        ) {
+            Ok(_) => {
+                let mut st = PROBE_STATE.lock();
+                st.resolve_pending = true;
+                st.last_resolve = None;
+                st.last_resolve_error.clear();
+            }
+            Err(err) => {
+                let mut st = PROBE_STATE.lock();
+                st.resolve_pending = false;
+                st.last_resolve = None;
+                st.last_resolve_error = err;
+            }
         }
     }
 }
@@ -880,7 +1049,11 @@ fn handle_page_wheel(ui: &Ui, page: &mut usize, total: usize) {
 
 fn progress_text(progress: Option<(usize, usize)>) -> Option<String> {
     let (done, total) = progress?;
-    Some(format!("{} / {}", format_number(done), format_number(total)))
+    Some(format!(
+        "{} / {}",
+        format_number(done),
+        format_number(total)
+    ))
 }
 
 fn total_pages(total: usize) -> usize {
