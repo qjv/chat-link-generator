@@ -61,6 +61,9 @@ const MAIN_THREAD_PATTERN: &str =
     "E8 ?? ?? ?? ?? 8B 0D ?? ?? ?? ?? 85 C9 75 08 89 05 ?? ?? ?? ?? EB 1D 3B C8 74 19";
 const RESOLVE_TEXT_HASH_PATTERN: &str =
     "89 54 24 10 4C 89 44 24 18 4C 89 4C 24 20 53 57 48 83 EC 48 8B D9 E8 ?? ?? ?? ?? 48 8B 48";
+const TEXT_PARSER_DEBUG_ASSERT_PATTERN: &str =
+    "40 53 56 57 48 81 EC 40 05 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 30 05 00 00 48 8B F9 41 8B F0 48 8D 0D ?? ?? ?? ?? 48 8B DA E8 ?? ?? ?? ?? 48 8D 4C 24 60";
+const TEXT_PARSER_DEBUG_ASSERT_CALL_OFFSET: usize = 45;
 
 const ITEM_SCAN_BOOTSTRAP_TAIL: u32 = 50_000;
 const ITEM_SCAN_PER_TICK: usize = 12;
@@ -448,6 +451,17 @@ fn clear_paused_jobs(state: &mut State) {
 }
 
 static STATE: Lazy<Mutex<State>> = Lazy::new(|| Mutex::new(State::default()));
+static TEXT_PARSER_ASSERT_PATCH: Lazy<Mutex<TextParserAssertPatch>> =
+    Lazy::new(|| Mutex::new(TextParserAssertPatch::default()));
+
+#[derive(Default)]
+struct TextParserAssertPatch {
+    call_addr: *mut u8,
+    original: [u8; 5],
+    resolved: bool,
+}
+
+unsafe impl Send for TextParserAssertPatch {}
 static AUTO_UPDATE_TRIGGERED: AtomicBool = AtomicBool::new(false);
 
 pub fn get_status() -> (DbStatus, usize, String, Option<(usize, usize)>) {
@@ -4559,19 +4573,26 @@ unsafe fn decode_text_hash_with_pointers(
     text_hash: u32,
     prop_ctx: *const u8,
 ) -> Option<String> {
-    let _ = prop_ctx;
     if !is_plausible_text_hash(text_hash)
         || pointers.resolve_text_hash_fn.is_null()
         || !is_executable(pointers.resolve_text_hash_fn as *const u8)
         || !live_text_resolve_enabled()
-        || read_prop_ctx(pointers.prop_ctx_getter, None).is_none()
     {
         return None;
     }
 
     type ResolveTextHashFn = unsafe extern "C" fn(u32, u32) -> *const u16;
     let resolve: ResolveTextHashFn = std::mem::transmute(pointers.resolve_text_hash_fn);
-    let coded = resolve(text_hash, 0);
+    let run_resolve = || resolve(text_hash, 0);
+    let coded = with_text_parser_assert_suppressed(|| {
+        if !pointers.prop_ctx_getter.is_null() {
+            with_prop_ctx_installed(pointers.prop_ctx_getter, prop_ctx, run_resolve)
+                .unwrap_or(std::ptr::null())
+        } else {
+            run_resolve()
+        }
+    })
+    .unwrap_or(std::ptr::null());
     if coded.is_null() {
         return None;
     }
@@ -4580,7 +4601,6 @@ unsafe fn decode_text_hash_with_pointers(
 }
 
 unsafe fn resolve_coded_text_ptr(state: &State, text_hash: u32, prop_ctx: *const u8) -> *const u16 {
-    let _ = prop_ctx;
     if !live_text_resolve_enabled() {
         let _ = (state, text_hash, prop_ctx);
         return std::ptr::null();
@@ -4591,13 +4611,19 @@ unsafe fn resolve_coded_text_ptr(state: &State, text_hash: u32, prop_ctx: *const
     if !is_executable(state.pointers.resolve_text_hash_fn as *const u8) {
         return std::ptr::null();
     }
-    if unsafe { read_prop_ctx(state.pointers.prop_ctx_getter, None) }.is_none() {
-        return std::ptr::null();
-    }
 
     type ResolveTextHashFn = unsafe extern "C" fn(u32, u32) -> *const u16;
     let resolve: ResolveTextHashFn = std::mem::transmute(state.pointers.resolve_text_hash_fn);
-    resolve(text_hash, 0)
+    let run_resolve = || resolve(text_hash, 0);
+    with_text_parser_assert_suppressed(|| {
+        if !state.pointers.prop_ctx_getter.is_null() {
+            with_prop_ctx_installed(state.pointers.prop_ctx_getter, prop_ctx, run_resolve)
+                .unwrap_or(std::ptr::null())
+        } else {
+            run_resolve()
+        }
+    })
+    .unwrap_or(std::ptr::null())
 }
 
 unsafe fn wide_string_len_checked(ptr: *const u16, max_len: usize) -> Option<usize> {
@@ -4663,6 +4689,74 @@ fn ensure_scan_pointers(state: &mut State) {
             scan_raw_first(RESOLVE_TEXT_HASH_PATTERN, module).unwrap_or(std::ptr::null_mut())
         };
     }
+}
+
+#[cfg(target_os = "windows")]
+unsafe fn with_text_parser_assert_suppressed<R>(f: impl FnOnce() -> R) -> Option<R> {
+    let mut patch = TEXT_PARSER_ASSERT_PATCH.lock();
+    if !patch.resolved {
+        patch.call_addr = scan_raw_first(TEXT_PARSER_DEBUG_ASSERT_PATTERN, game_module_range())
+            .map(|addr| addr.add(TEXT_PARSER_DEBUG_ASSERT_CALL_OFFSET))
+            .unwrap_or(std::ptr::null_mut());
+        if !patch.call_addr.is_null() && is_readable(patch.call_addr as *const u8, 5) {
+            std::ptr::copy_nonoverlapping(patch.call_addr, patch.original.as_mut_ptr(), 5);
+        } else {
+            patch.call_addr = std::ptr::null_mut();
+        }
+        patch.resolved = true;
+    }
+
+    if patch.call_addr.is_null() || !write_code_bytes(patch.call_addr, &[0x90; 5]) {
+        return None;
+    }
+
+    struct RestoreParserAssert<'a> {
+        patch: &'a TextParserAssertPatch,
+    }
+    impl Drop for RestoreParserAssert<'_> {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = write_code_bytes(self.patch.call_addr, &self.patch.original);
+            }
+        }
+    }
+
+    let _restore = RestoreParserAssert { patch: &patch };
+    Some(f())
+}
+
+#[cfg(not(target_os = "windows"))]
+unsafe fn with_text_parser_assert_suppressed<R>(f: impl FnOnce() -> R) -> Option<R> {
+    Some(f())
+}
+
+#[cfg(target_os = "windows")]
+unsafe fn write_code_bytes(dst: *mut u8, bytes: &[u8]) -> bool {
+    use windows::Win32::System::Memory::{
+        VirtualProtect, PAGE_EXECUTE_READWRITE, PAGE_PROTECTION_FLAGS,
+    };
+
+    if dst.is_null() || bytes.is_empty() {
+        return false;
+    }
+
+    let mut old = PAGE_PROTECTION_FLAGS(0);
+    if VirtualProtect(
+        dst as *const core::ffi::c_void,
+        bytes.len(),
+        PAGE_EXECUTE_READWRITE,
+        &mut old,
+    )
+    .is_err()
+    {
+        return false;
+    }
+
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
+
+    let mut ignored = PAGE_PROTECTION_FLAGS(0);
+    let _ = VirtualProtect(dst as *const core::ffi::c_void, bytes.len(), old, &mut ignored);
+    true
 }
 
 unsafe fn suggest_end_id_from_content_count(state: &State) -> u32 {
