@@ -65,7 +65,8 @@ const TEXT_PARSER_DEBUG_ASSERT_PATTERN: &str =
     "40 53 56 57 48 81 EC 40 05 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 30 05 00 00 48 8B F9 41 8B F0 48 8D 0D ?? ?? ?? ?? 48 8B DA E8 ?? ?? ?? ?? 48 8D 4C 24 60";
 const TEXT_PARSER_DEBUG_ASSERT_CALL_OFFSET: usize = 45;
 
-const ITEM_SCAN_BOOTSTRAP_TAIL: u32 = 50_000;
+const ITEM_SCAN_BOOTSTRAP_TAIL: u32 = 4_096;
+const ITEM_SCAN_MAX_TRAILING_GAP: u32 = 12_000;
 const ITEM_SCAN_PER_TICK: usize = 12;
 const ITEM_SCAN_BUDGET_MS: u64 = 1;
 const DECODES_PER_TICK: usize = 1;
@@ -3093,6 +3094,7 @@ fn item_scan_trailing_gap(entries: &[InGameItem]) -> u32 {
     largest_observed_gap
         .saturating_mul(4)
         .max(ITEM_SCAN_BOOTSTRAP_TAIL)
+        .min(ITEM_SCAN_MAX_TRAILING_GAP)
 }
 
 fn rebuild_entry_index(entries: &[InGameItem], out: &mut HashMap<u32, usize>) {
