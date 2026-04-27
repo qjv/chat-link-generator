@@ -435,7 +435,6 @@ fn render_browser_table(ui: &Ui) {
                 let selected = st.selected_id == row.id;
                 let clicked = Selectable::new(&format!("{}##catalog_id_{}", row.id, row.id))
                     .selected(selected)
-                    .span_all_columns(true)
                     .build(ui);
                 if ui.is_item_hovered() && ui.is_mouse_released(MouseButton::Right) {
                     copy_link = Some(row.chat_link.clone());
@@ -872,9 +871,7 @@ fn render_probe_results(ui: &Ui) {
         for row in &info.rows {
             ui.table_next_row();
             ui.table_next_column();
-            if Selectable::new(&format!("0x{:X}##probe_off_{:X}", row.offset, row.offset))
-                .span_all_columns(true)
-                .build(ui)
+            if Selectable::new(&format!("0x{:X}##probe_off_{:X}", row.offset, row.offset)).build(ui)
             {
                 clicked_offset = Some(row.offset);
             }
@@ -917,7 +914,6 @@ fn render_probe_results(ui: &Ui) {
                     "0x{:X}##probe_subdef_off_{:X}",
                     row.offset, row.offset
                 ))
-                .span_all_columns(true)
                 .build(ui)
                 {
                     PROBE_STATE.lock().offset = row.offset as i32;

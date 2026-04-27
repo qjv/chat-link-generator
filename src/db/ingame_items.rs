@@ -76,10 +76,10 @@ const GAME_DATA_SAVE_EVERY: usize = 2000;
 const GAME_DATA_COOLDOWN_MS: u64 = 3;
 const MAP_GAME_DATA_COOLDOWN_MS: u64 = 16;
 const NAME_DECODE_COOLDOWN_MS: u64 = 1;
-const NAME_DECODE_MAX_RETRIES: u8 = 10;
-const WARDROBE_NAME_DECODE_MAX_RETRIES: u8 = 64;
+const NAME_DECODE_MAX_RETRIES: u8 = 4;
+const WARDROBE_NAME_DECODE_MAX_RETRIES: u8 = 12;
 const WARDROBE_NAME_RESOLVE_ATTEMPTS: usize = 4;
-const GAME_TYPE_NAME_DECODE_MAX_RETRIES: u8 = 3;
+const GAME_TYPE_NAME_DECODE_MAX_RETRIES: u8 = 2;
 const MAX_TEXT_HASH_VALUE: u32 = 0x0100_0000;
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -1022,9 +1022,21 @@ pub fn consume_debug_resolve_result() -> Option<Result<DebugResolveResult, Strin
 
 fn is_unresolved_decoded_text(text: &str) -> bool {
     let t = text.trim();
-    t.is_empty()
-        || t.chars()
-            .all(|c| c == '?' || c == '？' || c == '\u{FFFD}' || c.is_whitespace())
+    if t.is_empty() {
+        return true;
+    }
+
+    let mut placeholder_chars = 0usize;
+    let mut meaningful_chars = 0usize;
+    for c in t.chars() {
+        if c == '?' || c == '？' || c == '\u{FFFD}' || c == '\u{FFFE}' || c == '\u{FFFF}' {
+            placeholder_chars += 1;
+        } else if !c.is_whitespace() && !c.is_control() {
+            meaningful_chars += 1;
+        }
+    }
+
+    placeholder_chars > 0 && meaningful_chars == 0
 }
 
 fn is_retryable_parse_name(name: &str) -> bool {
@@ -1624,9 +1636,7 @@ pub fn tick() {
                 let tries = job.retry_counts.entry(id).or_insert(0);
                 if *tries < NAME_DECODE_MAX_RETRIES {
                     *tries += 1;
-                    // Retry immediately instead of queueing at the tail, so progress does not
-                    // appear stalled at 0 on large datasets.
-                    job.ids.insert(job.cursor, id);
+                    job.ids.push(id);
                     continue;
                 }
             }
@@ -1672,7 +1682,8 @@ pub fn tick() {
                             }
                             out
                         };
-                        decoded_desc.filter(|d| !d.trim().is_empty())
+                        decoded_desc
+                            .filter(|d| !d.trim().is_empty() && !is_unresolved_decoded_text(d))
                     } else {
                         None
                     }
@@ -1720,8 +1731,8 @@ pub fn tick() {
                 if let Some(entry) = s.entries.get_mut(idx) {
                     entry.name = name.clone();
                     if is_upgrade_item {
-                        if let Some(upgrade_name) =
-                            decoded_upgrade_name.filter(|u| !u.trim().is_empty())
+                        if let Some(upgrade_name) = decoded_upgrade_name
+                            .filter(|u| !u.trim().is_empty() && !is_unresolved_decoded_text(u))
                         {
                             entry.upgrade_name = upgrade_name;
                         } else if let Some(upgrade_name) = fallback_upgrade_name {
@@ -1968,7 +1979,7 @@ pub fn tick() {
                 let tries = job.retry_counts.entry(id).or_insert(0);
                 if *tries < max_retries {
                     *tries += 1;
-                    job.ids.insert(job.cursor, id);
+                    job.ids.push(id);
                 } else if job.finalized_ids.insert(id) {
                     let placeholder = format!("{} #{}", type_name, id);
                     if let Some(row) = s
@@ -1991,7 +2002,7 @@ pub fn tick() {
                 let tries = job.retry_counts.entry(id).or_insert(0);
                 if *tries < max_retries {
                     *tries += 1;
-                    job.ids.insert(job.cursor, id);
+                    job.ids.push(id);
                 } else if job.finalized_ids.insert(id) {
                     let placeholder = format!("{} #{}", type_name, id);
                     if let Some(row) = s
@@ -2741,6 +2752,17 @@ fn sanitize_loaded_names(state: &mut State) {
     state
         .names
         .retain(|_, n| !is_unresolved_decoded_text(&n.name));
+    for entry in &mut state.entries {
+        if is_unresolved_decoded_text(&entry.name) {
+            entry.name = format!("Item #{}", entry.id);
+        }
+        if is_unresolved_decoded_text(&entry.description) {
+            entry.description.clear();
+        }
+        if is_unresolved_decoded_text(&entry.upgrade_name) {
+            entry.upgrade_name.clear();
+        }
+    }
     for bucket in state.game_type_names.values_mut() {
         bucket.retain(|_, n| !is_unresolved_decoded_text(&n.name));
     }
@@ -4214,10 +4236,22 @@ unsafe fn wide_string_len_checked(ptr: *const u16, max_len: usize) -> Option<usi
         return None;
     }
 
+    if !is_readable(ptr as *const u8, std::mem::size_of::<u16>()) {
+        return None;
+    }
+
+    let mut checked_until = 1usize;
     for len in 0..max_len {
         let ch_ptr = ptr.add(len);
-        if !is_readable(ch_ptr as *const u8, std::mem::size_of::<u16>()) {
-            return None;
+        if len >= checked_until {
+            let remaining = max_len.saturating_sub(len).min(64);
+            if !is_readable(
+                ch_ptr as *const u8,
+                remaining.saturating_mul(std::mem::size_of::<u16>()),
+            ) {
+                return None;
+            }
+            checked_until = len.saturating_add(remaining);
         }
         if *ch_ptr == 0 {
             return Some(len);
