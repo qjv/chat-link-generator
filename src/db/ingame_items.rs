@@ -59,8 +59,6 @@ const MAIN_THREAD_PATTERN: &str =
     "E8 ?? ?? ?? ?? 8B 0D ?? ?? ?? ?? 85 C9 75 08 89 05 ?? ?? ?? ?? EB 1D 3B C8 74 19";
 const RESOLVE_TEXT_HASH_PATTERN: &str =
     "89 54 24 10 4C 89 44 24 18 4C 89 4C 24 20 53 57 48 83 EC 48 8B D9 E8 ?? ?? ?? ?? 48 8B 48";
-const DECODE_TEXT_PATTERN: &str =
-    "48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 49 8B E8 48 8B F2 48 8B F9 48 85 C9 75 19";
 
 const ITEM_SCAN_BOOTSTRAP_TAIL: u32 = 50_000;
 const ITEM_SCAN_PER_TICK: usize = 12;
@@ -296,7 +294,6 @@ struct ScanPointers {
     prop_ctx_getter: *mut u8,
     main_thread_match: *mut u8,
     resolve_text_hash_fn: *mut u8,
-    decode_text_fn: *mut u8,
 }
 
 unsafe impl Send for ScanPointers {}
@@ -442,7 +439,6 @@ fn clear_paused_jobs(state: &mut State) {
 
 static STATE: Lazy<Mutex<State>> = Lazy::new(|| Mutex::new(State::default()));
 static AUTO_UPDATE_TRIGGERED: AtomicBool = AtomicBool::new(false);
-static DECODED_TEXT: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
 
 pub fn get_status() -> (DbStatus, usize, String, Option<(usize, usize)>) {
     let s = STATE.lock();
@@ -4163,43 +4159,6 @@ unsafe fn decode_non_item_name(
     (0, api_name.to_string())
 }
 
-unsafe fn decode_coded_text(
-    state: &State,
-    coded_text: *const u16,
-    prop_ctx: *const u8,
-) -> Option<String> {
-    if coded_text.is_null() || state.pointers.decode_text_fn.is_null() {
-        return None;
-    }
-    if !is_executable(state.pointers.decode_text_fn as *const u8) {
-        return None;
-    }
-    // The game decoder is sensitive to malformed CodedText pointers. Validate
-    // that the input at least looks like a readable, terminated UTF-16 buffer
-    // before handing it back to GW2 code.
-    wide_string_len_checked(coded_text, 2048)?;
-
-    type TextCallback = unsafe extern "C" fn(usize, *const u16);
-    type DecodeTextFn = unsafe extern "C" fn(*const u16, TextCallback, usize);
-
-    let decode: DecodeTextFn = std::mem::transmute(state.pointers.decode_text_fn);
-
-    {
-        let mut out = DECODED_TEXT.lock();
-        *out = None;
-    }
-
-    let run_decode = || decode(coded_text, decode_receiver, 0);
-
-    if !state.pointers.prop_ctx_getter.is_null() {
-        let _ = with_prop_ctx_installed(state.pointers.prop_ctx_getter, prop_ctx, run_decode);
-    } else {
-        run_decode();
-    }
-
-    DECODED_TEXT.lock().clone()
-}
-
 unsafe fn decode_text_hash(state: &State, text_hash: u32, prop_ctx: *const u8) -> Option<String> {
     if !is_plausible_text_hash(text_hash) {
         return None;
@@ -4209,7 +4168,7 @@ unsafe fn decode_text_hash(state: &State, text_hash: u32, prop_ctx: *const u8) -
         return None;
     }
 
-    decode_coded_text(state, coded, prop_ctx)
+    read_wide_string(coded, 1024).map(|text| text.trim().to_string())
 }
 
 unsafe fn resolve_coded_text_ptr(state: &State, text_hash: u32, prop_ctx: *const u8) -> *const u16 {
@@ -4273,23 +4232,6 @@ unsafe fn read_wide_string(ptr: *const u16, max_len: usize) -> Option<String> {
     Some(String::from_utf16_lossy(slice))
 }
 
-unsafe extern "C" fn decode_receiver(_ctx: usize, decoded_text: *const u16) {
-    if decoded_text.is_null() {
-        return;
-    }
-
-    let Some(len) = wide_string_len_checked(decoded_text, 2048) else {
-        return;
-    };
-    if len == 0 {
-        return;
-    }
-
-    let slice = std::slice::from_raw_parts(decoded_text, len);
-    let text = String::from_utf16_lossy(slice);
-    *DECODED_TEXT.lock() = Some(text);
-}
-
 fn ensure_scan_pointers(state: &mut State) {
     let module = game_module_range();
 
@@ -4310,11 +4252,6 @@ fn ensure_scan_pointers(state: &mut State) {
         state.pointers.resolve_text_hash_fn = unsafe {
             scan_raw_first(RESOLVE_TEXT_HASH_PATTERN, module).unwrap_or(std::ptr::null_mut())
         };
-    }
-
-    if state.pointers.decode_text_fn.is_null() {
-        state.pointers.decode_text_fn =
-            unsafe { scan_raw_first(DECODE_TEXT_PATTERN, module).unwrap_or(std::ptr::null_mut()) };
     }
 }
 
