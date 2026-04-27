@@ -22,6 +22,7 @@ const API_ITEMS_CACHE_FILE: &str = "db_api_items.json";
 const LOG_PREFIX: &str = "[ingame-items]";
 
 const ITEM_CONTENT_TYPE: u32 = 34; // EContentType::ItemDef
+const ITEM_TYPE_UPGRADE_COMPONENT: u32 = 23; // EItemType::UpgradeComponent
 const PROP_CTX_CONTENT_CTX: usize = 0xE0;
 const CONTENT_VT_COUNT_CONTENT_DEFS: usize = 0x40;
 const CONTENT_VT_ITERATE_CONTENT_DEFS: usize = 0x48;
@@ -38,6 +39,7 @@ const ITEM_DEF_VENDOR_VALUE: usize = 0x88;
 const ITEM_DEF_IS_GEMSTORE: usize = 0xB4;
 const ITEM_UPGRADE_TEXT_HASH1: usize = 0x60;
 const ITEM_UPGRADE_TEXT_HASH2: usize = 0x70;
+// Not present in GW2RE's ItemUpgrade_t; keep as a guarded fallback only.
 const ITEM_UPGRADE_BASE_ITEM_ID: usize = 0xA0;
 const CONTENT_DEF_TYPE: usize = 0x10;
 const CONTENT_DEF_INDEX: usize = 0x14;
@@ -1900,7 +1902,7 @@ pub fn tick() {
                 .map(|e| e.item_type_code)
                 .unwrap_or(u32::MAX);
             let can_use_skin_fallback = matches!(item_type_code, 0 | 24); // Armor | Weapon
-            let is_upgrade_item = item_type_code == 23; // UpgradeComponent
+            let is_upgrade_item = item_type_code == ITEM_TYPE_UPGRADE_COMPONENT;
 
             if let Some((content_ctx, get_content_by_index)) = item_content_access {
                 let fallback_skin_id = s
@@ -3781,14 +3783,14 @@ unsafe fn read_item_entry(
     let vendor_value = (item_ptr.add(ITEM_DEF_VENDOR_VALUE) as *const u32).read_unaligned();
     let is_gemstore = *item_ptr.add(ITEM_DEF_IS_GEMSTORE) != 0;
     let default_skin_id = read_item_default_skin_id(item_ptr);
-    let upgrade_name_hash = 0;
-    let base_upgrade_item_id = if item_type_code == 23 {
+    let upgrade_name_hash = if item_type_code == ITEM_TYPE_UPGRADE_COMPONENT {
+        read_item_upgrade_name_hash(item_ptr)
+    } else {
+        0
+    };
+    let base_upgrade_item_id = if item_type_code == ITEM_TYPE_UPGRADE_COMPONENT {
         let candidate = read_item_base_upgrade_item_id(item_ptr);
-        if candidate > 0 {
-            candidate
-        } else {
-            0
-        }
+        sanitize_base_upgrade_item_id(state, candidate)
     } else {
         0
     };
@@ -3832,7 +3834,7 @@ unsafe fn read_item_upgrade_name_hash(item_ptr: *const u8) -> u32 {
         ITEM_UPGRADE_TEXT_HASH1 + std::mem::size_of::<u32>(),
     ) {
         let h1 = (subdef_ptr.add(ITEM_UPGRADE_TEXT_HASH1) as *const u32).read_unaligned();
-        if h1 != 0 {
+        if is_plausible_text_hash(h1) {
             return h1;
         }
     }
@@ -3841,11 +3843,26 @@ unsafe fn read_item_upgrade_name_hash(item_ptr: *const u8) -> u32 {
         ITEM_UPGRADE_TEXT_HASH2 + std::mem::size_of::<u32>(),
     ) {
         let h2 = (subdef_ptr.add(ITEM_UPGRADE_TEXT_HASH2) as *const u32).read_unaligned();
-        if h2 != 0 {
+        if is_plausible_text_hash(h2) {
             return h2;
         }
     }
     0
+}
+
+fn sanitize_base_upgrade_item_id(state: &State, candidate: u32) -> u32 {
+    if candidate == 0 {
+        return 0;
+    }
+
+    if state.api_ids.contains(&candidate)
+        || state.entry_index.contains_key(&candidate)
+        || state.hashes.contains_key(&candidate)
+    {
+        candidate
+    } else {
+        0
+    }
 }
 
 unsafe fn read_item_base_upgrade_item_id(item_ptr: *const u8) -> u32 {
@@ -3880,13 +3897,14 @@ unsafe fn refresh_item_fallback_ids(
 
     let default_skin_id = read_item_default_skin_id(ptr);
     let item_type_code = (ptr.add(ITEM_DEF_TYPE) as *const u32).read_unaligned();
-    let base_upgrade_item_id = if item_type_code == 23 {
+    let upgrade_name_hash = if item_type_code == ITEM_TYPE_UPGRADE_COMPONENT {
+        read_item_upgrade_name_hash(ptr)
+    } else {
+        0
+    };
+    let base_upgrade_item_id = if item_type_code == ITEM_TYPE_UPGRADE_COMPONENT {
         let candidate = read_item_base_upgrade_item_id(ptr);
-        if candidate > 0 {
-            candidate
-        } else {
-            0
-        }
+        sanitize_base_upgrade_item_id(state, candidate)
     } else {
         0
     };
@@ -3899,7 +3917,7 @@ unsafe fn refresh_item_fallback_ids(
         }
     }
 
-    if default_skin_id == 0 && base_upgrade_item_id == 0 {
+    if default_skin_id == 0 && upgrade_name_hash == 0 && base_upgrade_item_id == 0 {
         return;
     }
 
@@ -3911,6 +3929,9 @@ unsafe fn refresh_item_fallback_ids(
             if base_upgrade_item_id != 0 {
                 h.base_upgrade_item_id = base_upgrade_item_id;
             }
+            if upgrade_name_hash != 0 {
+                h.upgrade_name_hash = upgrade_name_hash;
+            }
             h.last_seen_unix = ts;
         })
         .or_insert(ItemHashEntry {
@@ -3918,7 +3939,7 @@ unsafe fn refresh_item_fallback_ids(
             content_index: id,
             name_hash: 0,
             description_hash: 0,
-            upgrade_name_hash: 0,
+            upgrade_name_hash,
             base_upgrade_item_id,
             last_seen_unix: ts,
         });
