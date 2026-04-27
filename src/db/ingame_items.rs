@@ -79,6 +79,7 @@ const WARDROBE_NAME_DECODE_MAX_RETRIES: u8 = 12;
 const WARDROBE_NAME_RESOLVE_ATTEMPTS: usize = 4;
 const GAME_TYPE_NAME_DECODE_MAX_RETRIES: u8 = 2;
 const MAX_TEXT_HASH_VALUE: u32 = 0x0100_0000;
+const GAME_TEXT_RESOLVE_ENABLED: bool = true;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct InGameItem {
@@ -289,7 +290,7 @@ struct GameTypeBuildJob {
     map_api_names: HashMap<u32, String>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 struct ScanPointers {
     prop_ctx_getter: *mut u8,
     main_thread_match: *mut u8,
@@ -323,6 +324,7 @@ struct State {
     game_type_job: Option<GameTypeBuildJob>,
     game_type_name_job: Option<GameTypeNameParseJob>,
     map_name_job: Option<MapNameParseJob>,
+    text_decode_worker_active: bool,
     debug_resolve_job: Option<(encoder::LinkType, u32, Option<u32>, usize)>,
     debug_resolve_hash_job: Option<(encoder::LinkType, u32, usize, u32, Option<u64>)>,
     debug_resolve_result: Option<Result<DebugResolveResult, String>>,
@@ -356,6 +358,7 @@ impl Default for State {
             game_type_job: None,
             game_type_name_job: None,
             map_name_job: None,
+            text_decode_worker_active: false,
             debug_resolve_job: None,
             debug_resolve_hash_job: None,
             debug_resolve_result: None,
@@ -415,6 +418,7 @@ fn has_active_unpaused_job(state: &State) -> bool {
         || (state.name_job.is_some() && !state.name_parse_paused)
         || state.game_type_name_job.is_some()
         || state.map_name_job.is_some()
+        || state.text_decode_worker_active
         || state
             .game_type_job
             .as_ref()
@@ -666,27 +670,52 @@ fn start_name_parse(
         s.progress = None;
         return;
     }
-    s.name_job = Some(NameParseJob {
-        base_total: ids.len(),
-        ids,
-        cursor: 0,
-        phase: NameParsePhase::All,
-        equipment_failed_ids: Vec::new(),
-        upgrade_failed_ids: Vec::new(),
-        decoded: 0,
-        pending_flush: 0,
-        retry_counts: HashMap::new(),
-        finalized_ids: HashSet::new(),
-        base_finalized: 0,
-        include_descriptions,
-        full_rebuild: include_already_decoded,
-        next_decode_at: Instant::now(),
-        last_flush_at: Instant::now(),
-    });
+
+    let prop_ctx = unsafe {
+        read_prop_ctx(
+            s.pointers.prop_ctx_getter,
+            resolve_main_thread_id(s.pointers.main_thread_match),
+        )
+    };
+    let Some(prop_ctx) = prop_ctx else {
+        s.error_msg = "Waiting for PropContext (must be in-game)".to_string();
+        s.status = DbStatus::Loaded;
+        s.progress = None;
+        return;
+    };
+
+    let tasks: Vec<ItemNameDecodeTask> = ids
+        .into_iter()
+        .filter_map(|id| {
+            let h = s.hashes.get(&id)?;
+            Some(ItemNameDecodeTask {
+                id,
+                name_hash: h.name_hash,
+                description_hash: h.description_hash,
+                upgrade_name_hash: h.upgrade_name_hash,
+                include_description: include_descriptions,
+            })
+        })
+        .collect();
+    let total = tasks.len();
+    if total == 0 {
+        s.error_msg = "No decodable item hashes found.".to_string();
+        s.status = DbStatus::Loaded;
+        s.progress = None;
+        return;
+    }
+
+    s.name_job = None;
+    s.text_decode_worker_active = true;
     s.name_parse_paused = false;
     s.error_msg.clear();
     s.status = DbStatus::Updating;
-    s.progress = Some((0, s.name_job.as_ref().map(|j| j.base_total).unwrap_or(0)));
+    s.progress = Some((0, total));
+    let pointers = s.pointers;
+    let prop_ctx_addr = prop_ctx as usize;
+    drop(s);
+
+    spawn_item_name_decode_worker(pointers, prop_ctx_addr, tasks, total);
 }
 
 fn start_game_type_name_parse(link_type: encoder::LinkType, include_already_decoded: bool) {
@@ -747,29 +776,52 @@ fn start_game_type_name_parse(link_type: encoder::LinkType, include_already_deco
         return;
     }
 
-    s.game_type_name_job = Some(GameTypeNameParseJob {
-        link_type,
-        base_total: ids.len(),
-        ids,
-        cursor: 0,
-        decoded: 0,
-        pending_flush: 0,
-        retry_counts: HashMap::new(),
-        finalized_ids: HashSet::new(),
-        base_finalized: 0,
-        full_rebuild: include_already_decoded,
-        next_decode_at: Instant::now(),
-        last_flush_at: Instant::now(),
-    });
+    let prop_ctx = unsafe {
+        read_prop_ctx(
+            s.pointers.prop_ctx_getter,
+            resolve_main_thread_id(s.pointers.main_thread_match),
+        )
+    };
+    let Some(prop_ctx) = prop_ctx else {
+        s.error_msg = "Waiting for PropContext (must be in-game)".to_string();
+        s.status = DbStatus::Loaded;
+        s.progress = None;
+        return;
+    };
+
+    let tasks: Vec<GameTypeNameDecodeTask> = ids
+        .into_iter()
+        .filter_map(|id| {
+            let name_hash = s
+                .game_type_hashes
+                .get(&type_name)
+                .and_then(|m| m.get(&id))
+                .map(|h| h.name_hash)
+                .unwrap_or(0);
+            if name_hash == 0 {
+                return None;
+            }
+            Some(GameTypeNameDecodeTask { id, name_hash })
+        })
+        .collect();
+    let total = tasks.len();
+    if total == 0 {
+        s.error_msg = format!("No decodable {} hashes found.", link_type.name());
+        s.status = DbStatus::Loaded;
+        s.progress = None;
+        return;
+    }
+
+    s.game_type_name_job = None;
+    s.text_decode_worker_active = true;
     s.error_msg.clear();
     s.status = DbStatus::Updating;
-    s.progress = Some((
-        0,
-        s.game_type_name_job
-            .as_ref()
-            .map(|j| j.base_total)
-            .unwrap_or(0),
-    ));
+    s.progress = Some((0, total));
+    let pointers = s.pointers;
+    let prop_ctx_addr = prop_ctx as usize;
+    drop(s);
+
+    spawn_game_type_name_decode_worker(pointers, prop_ctx_addr, link_type, type_name, tasks, total);
 }
 
 fn start_map_name_parse(include_already_decoded: bool) {
@@ -814,26 +866,30 @@ fn start_map_name_parse(include_already_decoded: bool) {
         return;
     }
 
-    s.map_name_job = Some(MapNameParseJob {
-        base_total: hashes.len(),
-        hashes,
-        ids_by_hash,
-        cursor: 0,
-        decoded: 0,
-        pending_flush: 0,
-        retry_counts: HashMap::new(),
-        finalized_ids: HashSet::new(),
-        base_finalized: 0,
-        full_rebuild: include_already_decoded,
-        next_decode_at: Instant::now(),
-        last_flush_at: Instant::now(),
-    });
+    let prop_ctx = unsafe {
+        read_prop_ctx(
+            s.pointers.prop_ctx_getter,
+            resolve_main_thread_id(s.pointers.main_thread_match),
+        )
+    };
+    let Some(prop_ctx) = prop_ctx else {
+        s.error_msg = "Waiting for PropContext (must be in-game)".to_string();
+        s.status = DbStatus::Loaded;
+        s.progress = None;
+        return;
+    };
+
+    let total = hashes.len();
+    s.map_name_job = None;
+    s.text_decode_worker_active = true;
     s.error_msg.clear();
     s.status = DbStatus::Updating;
-    s.progress = Some((
-        0,
-        s.map_name_job.as_ref().map(|j| j.base_total).unwrap_or(0),
-    ));
+    s.progress = Some((0, total));
+    let pointers = s.pointers;
+    let prop_ctx_addr = prop_ctx as usize;
+    drop(s);
+
+    spawn_map_name_decode_worker(pointers, prop_ctx_addr, hashes, ids_by_hash, total);
 }
 
 pub fn set_name_parse_paused(paused: bool) {
@@ -1057,6 +1113,313 @@ fn is_retryable_parse_name(name: &str) -> bool {
 
 fn is_plausible_text_hash(hash: u32) -> bool {
     (4..MAX_TEXT_HASH_VALUE).contains(&hash)
+}
+
+#[derive(Clone)]
+struct ItemNameDecodeTask {
+    id: u32,
+    name_hash: u32,
+    description_hash: u32,
+    upgrade_name_hash: u32,
+    include_description: bool,
+}
+
+#[derive(Clone)]
+struct GameTypeNameDecodeTask {
+    id: u32,
+    name_hash: u32,
+}
+
+fn clean_decoded_text(text: Option<String>) -> Option<String> {
+    text.map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty() && !is_unresolved_decoded_text(t))
+}
+
+fn spawn_item_name_decode_worker(
+    pointers: ScanPointers,
+    prop_ctx_addr: usize,
+    tasks: Vec<ItemNameDecodeTask>,
+    total: usize,
+) {
+    std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(move || {
+            let prop_ctx = prop_ctx_addr as *const u8;
+            let mut decoded = 0usize;
+            for (idx, task) in tasks.into_iter().enumerate() {
+                if db::SHUTTING_DOWN.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                let name = unsafe {
+                    clean_decoded_text(decode_text_hash_with_pointers(
+                        pointers,
+                        task.name_hash,
+                        prop_ctx,
+                    ))
+                };
+                let description = if task.include_description {
+                    unsafe {
+                        clean_decoded_text(decode_text_hash_with_pointers(
+                            pointers,
+                            task.description_hash,
+                            prop_ctx,
+                        ))
+                    }
+                } else {
+                    None
+                };
+                let upgrade_name = unsafe {
+                    clean_decoded_text(decode_text_hash_with_pointers(
+                        pointers,
+                        task.upgrade_name_hash,
+                        prop_ctx,
+                    ))
+                };
+
+                if name.is_some() || description.is_some() || upgrade_name.is_some() {
+                    decoded = decoded.saturating_add(1);
+                    let ts = now_unix();
+                    let mut s = STATE.lock();
+                    if let Some(name) = name {
+                        s.names.insert(
+                            task.id,
+                            ItemNameEntry {
+                                id: task.id,
+                                name: name.clone(),
+                                last_seen_unix: ts,
+                            },
+                        );
+                        if let Some(idx) = s.entry_index.get(&task.id).copied() {
+                            if let Some(entry) = s.entries.get_mut(idx) {
+                                entry.name = name;
+                            }
+                        }
+                    }
+                    if let Some(idx) = s.entry_index.get(&task.id).copied() {
+                        if let Some(entry) = s.entries.get_mut(idx) {
+                            if let Some(description) = description {
+                                entry.description = description;
+                            }
+                            if let Some(upgrade_name) = upgrade_name {
+                                entry.upgrade_name = upgrade_name;
+                            }
+                        }
+                    }
+                }
+
+                {
+                    let mut s = STATE.lock();
+                    s.progress = Some((idx.saturating_add(1), total.max(1)));
+                    s.status = DbStatus::Updating;
+                }
+
+                if idx % DECODES_PER_TICK == DECODES_PER_TICK - 1 {
+                    std::thread::sleep(Duration::from_millis(NAME_DECODE_COOLDOWN_MS));
+                }
+            }
+
+            let mut s = STATE.lock();
+            sanitize_loaded_names(&mut s);
+            save_cache(CACHE_FILE, &s.entries);
+            save_names_cache(&s.names);
+            save_failed_names_cache(&s.name_failed);
+            s.text_decode_worker_active = false;
+            s.status = if s.entries.is_empty() {
+                DbStatus::NotLoaded
+            } else {
+                DbStatus::Loaded
+            };
+            s.progress = None;
+            s.error_msg.clear();
+            db::log_debug(&format!(
+                "{} item name worker completed: {} / {} decoded",
+                LOG_PREFIX, decoded, total
+            ));
+        });
+
+        if let Err(err) = result {
+            let mut s = STATE.lock();
+            s.text_decode_worker_active = false;
+            s.status = DbStatus::Error;
+            s.progress = None;
+            s.error_msg = format!("Name decode worker panicked: {:?}", err);
+            db::log_error(&format!("{} {}", LOG_PREFIX, s.error_msg));
+        }
+    });
+}
+
+fn spawn_game_type_name_decode_worker(
+    pointers: ScanPointers,
+    prop_ctx_addr: usize,
+    link_type: encoder::LinkType,
+    type_name: String,
+    tasks: Vec<GameTypeNameDecodeTask>,
+    total: usize,
+) {
+    std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(move || {
+            let prop_ctx = prop_ctx_addr as *const u8;
+            let mut decoded = 0usize;
+            for (idx, task) in tasks.into_iter().enumerate() {
+                if db::SHUTTING_DOWN.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                let name = unsafe {
+                    clean_decoded_text(decode_text_hash_with_pointers(
+                        pointers,
+                        task.name_hash,
+                        prop_ctx,
+                    ))
+                };
+                if let Some(name) = name {
+                    decoded = decoded.saturating_add(1);
+                    let ts = now_unix();
+                    let mut s = STATE.lock();
+                    s.game_type_names
+                        .entry(type_name.clone())
+                        .or_default()
+                        .insert(
+                            task.id,
+                            ItemNameEntry {
+                                id: task.id,
+                                name: name.clone(),
+                                last_seen_unix: ts,
+                            },
+                        );
+                    if let Some(row) = s
+                        .game_type_data
+                        .entry(type_name.clone())
+                        .or_default()
+                        .get_mut(&task.id)
+                    {
+                        row.name = name;
+                        row.last_seen_unix = ts;
+                    }
+                }
+
+                {
+                    let mut s = STATE.lock();
+                    s.progress = Some((idx.saturating_add(1), total.max(1)));
+                    s.status = DbStatus::Updating;
+                }
+
+                if idx % DECODES_PER_TICK == DECODES_PER_TICK - 1 {
+                    std::thread::sleep(Duration::from_millis(NAME_DECODE_COOLDOWN_MS));
+                }
+            }
+
+            let mut s = STATE.lock();
+            sanitize_loaded_names(&mut s);
+            save_game_type_data_cache(&s.game_type_data, &s.game_type_hashes, &s.game_type_names);
+            s.text_decode_worker_active = false;
+            s.status = if s.entries.is_empty() {
+                DbStatus::NotLoaded
+            } else {
+                DbStatus::Loaded
+            };
+            s.progress = None;
+            s.error_msg.clear();
+            db::log_debug(&format!(
+                "{} {} name worker completed: {} / {} decoded",
+                LOG_PREFIX,
+                link_type.name(),
+                decoded,
+                total
+            ));
+        });
+
+        if let Err(err) = result {
+            let mut s = STATE.lock();
+            s.text_decode_worker_active = false;
+            s.status = DbStatus::Error;
+            s.progress = None;
+            s.error_msg = format!(
+                "{} name decode worker panicked: {:?}",
+                link_type.name(),
+                err
+            );
+            db::log_error(&format!("{} {}", LOG_PREFIX, s.error_msg));
+        }
+    });
+}
+
+fn spawn_map_name_decode_worker(
+    pointers: ScanPointers,
+    prop_ctx_addr: usize,
+    hashes: Vec<u32>,
+    ids_by_hash: HashMap<u32, Vec<u32>>,
+    total: usize,
+) {
+    std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(move || {
+            let prop_ctx = prop_ctx_addr as *const u8;
+            let type_name = encoder::LinkType::Map.name().to_string();
+            let mut decoded = 0usize;
+            for (idx, hash) in hashes.into_iter().enumerate() {
+                if db::SHUTTING_DOWN.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                let name = unsafe {
+                    clean_decoded_text(decode_text_hash_with_pointers(pointers, hash, prop_ctx))
+                };
+                if let Some(name) = name {
+                    decoded = decoded.saturating_add(1);
+                    let ts = now_unix();
+                    let mut s = STATE.lock();
+                    if let Some(ids) = ids_by_hash.get(&hash) {
+                        for &id in ids {
+                            if let Some(row) = s
+                                .game_type_data
+                                .entry(type_name.clone())
+                                .or_default()
+                                .get_mut(&id)
+                            {
+                                row.map_name = name.clone();
+                                row.last_seen_unix = ts;
+                            }
+                        }
+                    }
+                }
+
+                {
+                    let mut s = STATE.lock();
+                    s.progress = Some((idx.saturating_add(1), total.max(1)));
+                    s.status = DbStatus::Updating;
+                }
+
+                if idx % DECODES_PER_TICK == DECODES_PER_TICK - 1 {
+                    std::thread::sleep(Duration::from_millis(NAME_DECODE_COOLDOWN_MS));
+                }
+            }
+
+            let mut s = STATE.lock();
+            sanitize_loaded_names(&mut s);
+            save_game_type_data_cache(&s.game_type_data, &s.game_type_hashes, &s.game_type_names);
+            s.text_decode_worker_active = false;
+            s.status = if s.entries.is_empty() {
+                DbStatus::NotLoaded
+            } else {
+                DbStatus::Loaded
+            };
+            s.progress = None;
+            s.error_msg.clear();
+            db::log_debug(&format!(
+                "{} map name worker completed: {} / {} decoded",
+                LOG_PREFIX, decoded, total
+            ));
+        });
+
+        if let Err(err) = result {
+            let mut s = STATE.lock();
+            s.text_decode_worker_active = false;
+            s.status = DbStatus::Error;
+            s.progress = None;
+            s.error_msg = format!("Map name decode worker panicked: {:?}", err);
+            db::log_error(&format!("{} {}", LOG_PREFIX, s.error_msg));
+        }
+    });
 }
 
 pub fn debug_is_known_hash_for_type(link_type: encoder::LinkType, hash: u32) -> bool {
@@ -4171,7 +4534,39 @@ unsafe fn decode_text_hash(state: &State, text_hash: u32, prop_ctx: *const u8) -
     read_wide_string(coded, 1024).map(|text| text.trim().to_string())
 }
 
+unsafe fn decode_text_hash_with_pointers(
+    pointers: ScanPointers,
+    text_hash: u32,
+    prop_ctx: *const u8,
+) -> Option<String> {
+    if !is_plausible_text_hash(text_hash)
+        || pointers.resolve_text_hash_fn.is_null()
+        || !is_executable(pointers.resolve_text_hash_fn as *const u8)
+    {
+        return None;
+    }
+
+    type ResolveTextHashFn = unsafe extern "C" fn(u32, u32) -> *const u16;
+    let resolve: ResolveTextHashFn = std::mem::transmute(pointers.resolve_text_hash_fn);
+    let run_resolve = || resolve(text_hash, 0);
+    let coded = if !pointers.prop_ctx_getter.is_null() {
+        with_prop_ctx_installed(pointers.prop_ctx_getter, prop_ctx, run_resolve)
+            .unwrap_or(std::ptr::null())
+    } else {
+        run_resolve()
+    };
+    if coded.is_null() {
+        return None;
+    }
+
+    read_wide_string(coded, 1024).map(|text| text.trim().to_string())
+}
+
 unsafe fn resolve_coded_text_ptr(state: &State, text_hash: u32, prop_ctx: *const u8) -> *const u16 {
+    if !GAME_TEXT_RESOLVE_ENABLED {
+        let _ = (state, text_hash, prop_ctx);
+        return std::ptr::null();
+    }
     if !is_plausible_text_hash(text_hash) || state.pointers.resolve_text_hash_fn.is_null() {
         return std::ptr::null();
     }
