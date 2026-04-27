@@ -62,9 +62,7 @@ const RESOLVE_TEXT_HASH_PATTERN: &str =
 const DECODE_TEXT_PATTERN: &str =
     "48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 49 8B E8 48 8B F2 48 8B F9 48 85 C9 75 19";
 
-const MAX_IDS_FALLBACK: u32 = 2_000_000;
-const ITEM_SCAN_FORWARD_WINDOW: u32 = 25_000;
-const ITEM_SCAN_MIN_END_ID: u32 = 150_000;
+const ITEM_SCAN_BOOTSTRAP_TAIL: u32 = 50_000;
 const ITEM_SCAN_PER_TICK: usize = 12;
 const ITEM_SCAN_BUDGET_MS: u64 = 1;
 const DECODES_PER_TICK: usize = 1;
@@ -215,6 +213,8 @@ struct ScanJob {
     start_id: u32,
     current_id: u32,
     end_id: u32,
+    last_found_id: u32,
+    trailing_gap: u32,
     processed: usize,
     added: usize,
 }
@@ -610,13 +610,14 @@ pub fn rebuild() {
     let (api_ids, api_names) = load_api_index();
     s.api_ids = api_ids;
     s.api_names = api_names;
+    let previous_last_game_id = s.entries.iter().map(|e| e.id).max().unwrap_or(0);
     s.error_msg.clear();
     s.progress = Some((0, 0));
     s.status = DbStatus::Loading;
     s.entries.clear();
     s.entry_index.clear();
 
-    start_job(&mut s, JobMode::Rebuild, 1);
+    start_job(&mut s, JobMode::Rebuild, 1, previous_last_game_id);
 }
 
 pub fn parse_names_from_hashes(include_api_named: bool, include_descriptions: bool) {
@@ -1189,7 +1190,8 @@ pub fn update() {
     s.progress = Some((0, 0));
     s.status = DbStatus::Updating;
 
-    start_job(&mut s, JobMode::Update, 1);
+    let last_game_id = s.entries.iter().map(|e| e.id).max().unwrap_or(0);
+    start_job(&mut s, JobMode::Update, 1, last_game_id);
 }
 
 pub fn maybe_auto_update_on_load() {
@@ -1403,7 +1405,6 @@ pub fn tick() {
             }
         };
 
-        let total = job.end_id.saturating_sub(job.start_id).saturating_add(1) as usize;
         let scan_started = Instant::now();
         for _ in 0..ITEM_SCAN_PER_TICK {
             if job.current_id > job.end_id {
@@ -1423,6 +1424,10 @@ pub fn tick() {
             if let Some((entry, content_index, name_hash, description_hash, upgrade_name_hash, base_upgrade_item_id)) =
                 unsafe { read_item_entry(&s, item_ptr, id) }
             {
+                job.last_found_id = job.last_found_id.max(entry.id);
+                job.end_id = job
+                    .end_id
+                    .max(job.last_found_id.saturating_add(job.trailing_gap));
                 if matches!(job.mode, JobMode::Rebuild)
                     || !s.entry_index.contains_key(&entry.id)
                 {
@@ -1441,6 +1446,7 @@ pub fn tick() {
 
         let done = job.current_id > job.end_id;
 
+        let total = job.end_id.saturating_sub(job.start_id).saturating_add(1) as usize;
         s.progress = Some((job.processed.min(total), total));
 
         if done {
@@ -2562,17 +2568,15 @@ pub fn get_item(id: u32) -> Option<InGameItem> {
     s.entries.iter().find(|e| e.id == id).cloned()
 }
 
-fn start_job(state: &mut State, mode: JobMode, start_id: u32) {
+fn start_job(state: &mut State, mode: JobMode, start_id: u32, seed_last_found_id: u32) {
     ensure_scan_pointers(state);
 
     let start_id = start_id.max(1);
-    let last_game_id = state.entries.iter().map(|e| e.id).max().unwrap_or(0);
-    let last_api_id = state.api_ids.iter().copied().max().unwrap_or(0);
-    let frontier = last_game_id.max(last_api_id).max(ITEM_SCAN_MIN_END_ID);
-    let end_id = frontier
-        .saturating_add(ITEM_SCAN_FORWARD_WINDOW)
-        .min(MAX_IDS_FALLBACK)
-        .max(start_id);
+    let last_game_id = seed_last_found_id.max(state.entries.iter().map(|e| e.id).max().unwrap_or(0));
+    let trailing_gap = item_scan_trailing_gap(&state.entries);
+    let end_id = last_game_id
+        .saturating_add(trailing_gap)
+        .max(start_id.saturating_add(trailing_gap));
     let total = end_id.saturating_sub(start_id).saturating_add(1);
 
     state.scan = Some(ScanJob {
@@ -2580,13 +2584,15 @@ fn start_job(state: &mut State, mode: JobMode, start_id: u32) {
         start_id,
         current_id: start_id,
         end_id,
+        last_found_id: last_game_id,
+        trailing_gap,
         processed: 0,
         added: 0,
     });
 
     db::log_debug(&format!(
-        "{} started {:?}: probing item ids {}..{} ({} ids)",
-        LOG_PREFIX, mode, start_id, end_id, total
+        "{} started {:?}: probing item ids {}..{} ({} ids, trailing gap {})",
+        LOG_PREFIX, mode, start_id, end_id, total, trailing_gap
     ));
 }
 
@@ -2606,6 +2612,22 @@ fn finalize_job(state: &mut State, job: ScanJob) {
         "{} finished {:?}: scanned {} ids, added/updated {}",
         LOG_PREFIX, job.mode, job.processed, job.added
     ));
+}
+
+fn item_scan_trailing_gap(entries: &[InGameItem]) -> u32 {
+    let mut ids: Vec<u32> = entries.iter().map(|entry| entry.id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+
+    let largest_observed_gap = ids
+        .windows(2)
+        .map(|pair| pair[1].saturating_sub(pair[0]))
+        .max()
+        .unwrap_or(0);
+
+    largest_observed_gap
+        .saturating_mul(4)
+        .max(ITEM_SCAN_BOOTSTRAP_TAIL)
 }
 
 fn rebuild_entry_index(entries: &[InGameItem], out: &mut HashMap<u32, usize>) {
@@ -3292,7 +3314,7 @@ unsafe fn read_item_entry(
     let upgrade_name_hash = 0;
     let base_upgrade_item_id = if item_type_code == 23 {
         let candidate = read_item_base_upgrade_item_id(item_ptr);
-        if candidate > 0 && candidate <= MAX_IDS_FALLBACK {
+        if candidate > 0 {
             candidate
         } else {
             0
@@ -3381,7 +3403,7 @@ unsafe fn refresh_item_fallback_ids(
     let item_type_code = (ptr.add(ITEM_DEF_TYPE) as *const u32).read_unaligned();
     let base_upgrade_item_id = if item_type_code == 23 {
         let candidate = read_item_base_upgrade_item_id(ptr);
-        if candidate > 0 && candidate <= MAX_IDS_FALLBACK {
+        if candidate > 0 {
             candidate
         } else {
             0
