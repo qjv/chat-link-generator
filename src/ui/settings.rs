@@ -36,6 +36,11 @@ pub fn render_settings(ui: &Ui) {
         "Unsafe live GW2 text resolving",
         &mut cfg.live_text_resolve_enabled,
     );
+    ui.set_next_item_width(80.0);
+    Drag::new("Name Decodes/Tick")
+        .speed(1.0)
+        .range(1, 64)
+        .build(ui, &mut cfg.name_decodes_per_tick);
 
     // Drop cfg lock before calling db functions
     drop(cfg);

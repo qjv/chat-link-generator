@@ -18,12 +18,21 @@ pub struct UserConfig {
     pub fast_rebuild_item_db: bool,
     #[serde(default = "default_live_text_resolve_enabled")]
     pub live_text_resolve_enabled: bool,
+    #[serde(default = "default_name_decodes_per_tick")]
+    pub name_decodes_per_tick: i32,
 }
 
-fn default_link_type_index() -> usize { 0 }
-fn default_batch_size() -> i32 { 50 }
+fn default_link_type_index() -> usize {
+    0
+}
+fn default_batch_size() -> i32 {
+    50
+}
 fn default_live_text_resolve_enabled() -> bool {
     true
+}
+fn default_name_decodes_per_tick() -> i32 {
+    1
 }
 
 impl Default for UserConfig {
@@ -35,6 +44,7 @@ impl Default for UserConfig {
             auto_update_item_db_on_load: false,
             fast_rebuild_item_db: false,
             live_text_resolve_enabled: true,
+            name_decodes_per_tick: 1,
         }
     }
 }
@@ -48,6 +58,7 @@ pub struct RuntimeConfig {
     pub auto_update_item_db_on_load: bool,
     pub fast_rebuild_item_db: bool,
     pub live_text_resolve_enabled: bool,
+    pub name_decodes_per_tick: i32,
 }
 
 impl Default for RuntimeConfig {
@@ -61,6 +72,7 @@ impl Default for RuntimeConfig {
             auto_update_item_db_on_load: false,
             fast_rebuild_item_db: false,
             live_text_resolve_enabled: true,
+            name_decodes_per_tick: 1,
         }
     }
 }
@@ -68,8 +80,7 @@ impl Default for RuntimeConfig {
 pub static RUNTIME_CONFIG: Lazy<Mutex<RuntimeConfig>> =
     Lazy::new(|| Mutex::new(RuntimeConfig::default()));
 
-pub static USER_CONFIG: Lazy<Mutex<UserConfig>> =
-    Lazy::new(|| Mutex::new(UserConfig::default()));
+pub static USER_CONFIG: Lazy<Mutex<UserConfig>> = Lazy::new(|| Mutex::new(UserConfig::default()));
 
 pub fn load_user_config() {
     let Some(dir) = nexus::paths::get_addon_dir("chat_link_generator") else {
@@ -85,6 +96,7 @@ pub fn load_user_config() {
             rt.auto_update_item_db_on_load = cfg.auto_update_item_db_on_load;
             rt.fast_rebuild_item_db = cfg.fast_rebuild_item_db;
             rt.live_text_resolve_enabled = cfg.live_text_resolve_enabled;
+            rt.name_decodes_per_tick = cfg.name_decodes_per_tick.clamp(1, 64);
             rt.start_id = LinkType::ALL[rt.link_type_index].default_start() as i32;
             *USER_CONFIG.lock() = cfg;
         }
@@ -107,6 +119,7 @@ pub fn save_user_config() {
             auto_update_item_db_on_load: rt.auto_update_item_db_on_load,
             fast_rebuild_item_db: rt.fast_rebuild_item_db,
             live_text_resolve_enabled: rt.live_text_resolve_enabled,
+            name_decodes_per_tick: rt.name_decodes_per_tick.clamp(1, 64),
         }
     };
 

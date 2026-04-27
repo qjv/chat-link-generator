@@ -61,6 +61,8 @@ const MAIN_THREAD_PATTERN: &str =
     "E8 ?? ?? ?? ?? 8B 0D ?? ?? ?? ?? 85 C9 75 08 89 05 ?? ?? ?? ?? EB 1D 3B C8 74 19";
 const RESOLVE_TEXT_HASH_PATTERN: &str =
     "89 54 24 10 4C 89 44 24 18 4C 89 4C 24 20 53 57 48 83 EC 48 8B D9 E8 ?? ?? ?? ?? 48 8B 48";
+const DECODE_TEXT_PATTERN: &str =
+    "48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 49 8B E8 48 8B F2 48 8B F9 48 85 C9 75 19 41 B8 ?? ?? ?? ?? 48 8D 15 ?? ?? ?? ?? 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ??";
 const TEXT_PARSER_DEBUG_ASSERT_PATTERN: &str =
     "40 53 56 57 48 81 EC 40 05 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 30 05 00 00 48 8B F9 41 8B F0 48 8D 0D ?? ?? ?? ?? 48 8B DA E8 ?? ?? ?? ?? 48 8D 4C 24 60";
 const TEXT_PARSER_DEBUG_ASSERT_CALL_OFFSET: usize = 45;
@@ -69,7 +71,6 @@ const ITEM_SCAN_BOOTSTRAP_TAIL: u32 = 4_096;
 const ITEM_SCAN_MAX_TRAILING_GAP: u32 = 12_000;
 const ITEM_SCAN_PER_TICK: usize = 12;
 const ITEM_SCAN_BUDGET_MS: u64 = 1;
-const DECODES_PER_TICK: usize = 1;
 const NAME_PARSE_BUDGET_MS: u64 = 1;
 const GAME_DATA_PER_TICK: usize = 24;
 const MAP_GAME_DATA_PER_TICK: usize = 1;
@@ -89,6 +90,10 @@ const GAME_TEXT_RESOLVE_ENABLED: bool = true;
 
 fn live_text_resolve_enabled() -> bool {
     GAME_TEXT_RESOLVE_ENABLED && RUNTIME_CONFIG.lock().live_text_resolve_enabled
+}
+
+fn name_decodes_per_tick() -> usize {
+    RUNTIME_CONFIG.lock().name_decodes_per_tick.clamp(1, 64) as usize
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -305,6 +310,7 @@ struct ScanPointers {
     prop_ctx_getter: *mut u8,
     main_thread_match: *mut u8,
     resolve_text_hash_fn: *mut u8,
+    decode_text_fn: *mut u8,
 }
 
 unsafe impl Send for ScanPointers {}
@@ -1229,7 +1235,8 @@ fn spawn_item_name_decode_worker(
                     s.status = DbStatus::Updating;
                 }
 
-                if idx % DECODES_PER_TICK == DECODES_PER_TICK - 1 {
+                let decode_limit = name_decodes_per_tick();
+                if idx % decode_limit == decode_limit - 1 {
                     std::thread::sleep(Duration::from_millis(NAME_DECODE_COOLDOWN_MS));
                 }
             }
@@ -1320,7 +1327,8 @@ fn spawn_game_type_name_decode_worker(
                     s.status = DbStatus::Updating;
                 }
 
-                if idx % DECODES_PER_TICK == DECODES_PER_TICK - 1 {
+                let decode_limit = name_decodes_per_tick();
+                if idx % decode_limit == decode_limit - 1 {
                     std::thread::sleep(Duration::from_millis(NAME_DECODE_COOLDOWN_MS));
                 }
             }
@@ -1405,7 +1413,8 @@ fn spawn_map_name_decode_worker(
                     s.status = DbStatus::Updating;
                 }
 
-                if idx % DECODES_PER_TICK == DECODES_PER_TICK - 1 {
+                let decode_limit = name_decodes_per_tick();
+                if idx % decode_limit == decode_limit - 1 {
                     std::thread::sleep(Duration::from_millis(NAME_DECODE_COOLDOWN_MS));
                 }
             }
@@ -1897,7 +1906,8 @@ pub fn tick() {
 
         let mut steps = 0usize;
         let parse_started = Instant::now();
-        while job.cursor < job.ids.len() && steps < DECODES_PER_TICK.max(1) {
+        let decode_limit = name_decodes_per_tick();
+        while job.cursor < job.ids.len() && steps < decode_limit {
             if parse_started.elapsed() >= Duration::from_millis(NAME_PARSE_BUDGET_MS) {
                 break;
             }
@@ -2234,7 +2244,8 @@ pub fn tick() {
         let game_type_content_type = link_type_to_content_type(job.link_type).unwrap_or(0);
         let mut steps = 0usize;
         let parse_started = Instant::now();
-        while job.cursor < job.ids.len() && steps < DECODES_PER_TICK.max(1) {
+        let decode_limit = name_decodes_per_tick();
+        while job.cursor < job.ids.len() && steps < decode_limit {
             if parse_started.elapsed() >= Duration::from_millis(NAME_PARSE_BUDGET_MS) {
                 break;
             }
@@ -2474,7 +2485,8 @@ pub fn tick() {
         let type_name = encoder::LinkType::Map.name().to_string();
         let mut steps = 0usize;
         let parse_started = Instant::now();
-        while job.cursor < job.hashes.len() && steps < DECODES_PER_TICK.max(1) {
+        let decode_limit = name_decodes_per_tick();
+        while job.cursor < job.hashes.len() && steps < decode_limit {
             if parse_started.elapsed() >= Duration::from_millis(NAME_PARSE_BUDGET_MS) {
                 break;
             }
@@ -4567,7 +4579,7 @@ unsafe fn decode_text_hash(state: &State, text_hash: u32, prop_ctx: *const u8) -
         return None;
     }
 
-    read_wide_string(coded, 1024).map(|text| text.trim().to_string())
+    decode_coded_text(state.pointers.decode_text_fn, coded).or_else(|| read_clean_coded_text(coded))
 }
 
 unsafe fn decode_text_hash_with_pointers(
@@ -4599,7 +4611,48 @@ unsafe fn decode_text_hash_with_pointers(
         return None;
     }
 
-    read_wide_string(coded, 1024).map(|text| text.trim().to_string())
+    decode_coded_text(pointers.decode_text_fn, coded).or_else(|| read_clean_coded_text(coded))
+}
+
+unsafe fn read_clean_coded_text(coded: *const u16) -> Option<String> {
+    read_wide_string(coded, 1024)
+        .map(|text| text.trim().to_string())
+        .filter(|text| !is_unresolved_decoded_text(text))
+}
+
+unsafe fn decode_coded_text(decode_text_fn: *mut u8, coded: *const u16) -> Option<String> {
+    if coded.is_null() || decode_text_fn.is_null() || !is_executable(decode_text_fn as *const u8) {
+        return None;
+    }
+
+    type DecodeTextFn = unsafe extern "C" fn(
+        *const u16,
+        unsafe extern "C" fn(*mut core::ffi::c_void, *const u16),
+        *mut core::ffi::c_void,
+    );
+    let decode: DecodeTextFn = std::mem::transmute(decode_text_fn);
+
+    unsafe extern "C" fn receiver(ctx: *mut core::ffi::c_void, decoded: *const u16) {
+        if ctx.is_null() || decoded.is_null() {
+            return;
+        }
+        let out = &mut *(ctx as *mut Option<String>);
+        *out = read_wide_string(decoded, 4096)
+            .map(|text| text.trim().to_string())
+            .filter(|text| !is_unresolved_decoded_text(text));
+    }
+
+    let mut out = None;
+    let out_ptr = &mut out as *mut Option<String> as *mut core::ffi::c_void;
+    let ran = with_text_parser_assert_suppressed(|| {
+        decode(coded, receiver, out_ptr);
+    })
+    .is_some();
+    if ran {
+        out
+    } else {
+        None
+    }
 }
 
 unsafe fn resolve_coded_text_ptr(state: &State, text_hash: u32, prop_ctx: *const u8) -> *const u16 {
@@ -4691,6 +4744,11 @@ fn ensure_scan_pointers(state: &mut State) {
             scan_raw_first(RESOLVE_TEXT_HASH_PATTERN, module).unwrap_or(std::ptr::null_mut())
         };
     }
+
+    if state.pointers.decode_text_fn.is_null() {
+        state.pointers.decode_text_fn =
+            unsafe { scan_raw_first(DECODE_TEXT_PATTERN, module).unwrap_or(std::ptr::null_mut()) };
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -4757,7 +4815,12 @@ unsafe fn write_code_bytes(dst: *mut u8, bytes: &[u8]) -> bool {
     std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
 
     let mut ignored = PAGE_PROTECTION_FLAGS(0);
-    let _ = VirtualProtect(dst as *const core::ffi::c_void, bytes.len(), old, &mut ignored);
+    let _ = VirtualProtect(
+        dst as *const core::ffi::c_void,
+        bytes.len(),
+        old,
+        &mut ignored,
+    );
     true
 }
 

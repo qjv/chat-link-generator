@@ -616,6 +616,14 @@ fn render_jobs_tab(ui: &Ui) {
     ui.text(format!("Selected type: {}", link_type.name()));
     render_status_line(ui, "API", status.api.clone());
     render_status_line(ui, "Game", status.game.clone());
+    {
+        let mut cfg = RUNTIME_CONFIG.lock();
+        ui.set_next_item_width(80.0);
+        Drag::new("Name Decodes/Tick##jobs")
+            .speed(1.0)
+            .range(1, 64)
+            .build(ui, &mut cfg.name_decodes_per_tick);
+    }
     ui.text_disabled(
         "All-type game-memory builds are disabled. Use Browse > Update Game for one selected type.",
     );
