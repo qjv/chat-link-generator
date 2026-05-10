@@ -117,6 +117,7 @@ pub struct CatalogQuery {
     pub link_type: LinkType,
     pub source_view: SourceView,
     pub search: String,
+    pub type_filter: String,
     pub min_id: u32,
     pub max_id: Option<u32>,
     pub sort: CatalogSort,
@@ -172,6 +173,7 @@ pub fn query_records(query: &CatalogQuery) -> Vec<CatalogRecord> {
     }
 
     let search = query.search.trim().to_lowercase();
+    let type_filter = query.type_filter.trim().to_lowercase();
     let mut rows: Vec<CatalogRecord> = merged
         .into_iter()
         .filter_map(|(id, (api_name, game_name))| {
@@ -188,6 +190,9 @@ pub fn query_records(query: &CatalogQuery) -> Vec<CatalogRecord> {
             let game_name = game_name.map(|name| clean_name(query.link_type, id, &name));
             let category = record_category(query.link_type, id, &item_categories);
             let comparison = compare_names(api_name.as_deref(), game_name.as_deref());
+            if !type_filter.is_empty() && !category.to_lowercase().contains(&type_filter) {
+                return None;
+            }
             let keep = match query.source_view {
                 SourceView::Merged => true,
                 SourceView::Api => api_name.is_some(),
@@ -292,12 +297,8 @@ fn normalize_name(name: &str) -> String {
     s
 }
 
-fn clean_name(link_type: LinkType, id: u32, name: &str) -> String {
-    let mut s = normalize_name(name);
-    if link_type == LinkType::Item && s == format!("Item #{}", id) {
-        s.clear();
-    }
-    s
+fn clean_name(_link_type: LinkType, _id: u32, name: &str) -> String {
+    normalize_name(name)
 }
 
 fn record_category(

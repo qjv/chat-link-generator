@@ -18,7 +18,9 @@ const PAGE_SIZE: usize = 18;
 struct WorkbenchState {
     selected_type: usize,
     source_view: usize,
+    search_input: String,
     search: String,
+    type_filter: String,
     min_id: i32,
     max_id: i32,
     sort: usize,
@@ -28,6 +30,7 @@ struct WorkbenchState {
     cache_type: usize,
     cache_source_view: usize,
     cache_search: String,
+    cache_type_filter: String,
     cache_min_id: i32,
     cache_max_id: i32,
     cache_sort: usize,
@@ -40,19 +43,26 @@ impl Default for WorkbenchState {
         Self {
             selected_type: 0,
             source_view: 0,
+
+            search_input: String::new(),
             search: String::new(),
+            type_filter: String::new(),
+
             min_id: 0,
             max_id: 0,
             sort: 0,
             page: 0,
             selected_id: 0,
             rows: Vec::new(),
+
             cache_type: usize::MAX,
             cache_source_view: usize::MAX,
             cache_search: String::new(),
+            cache_type_filter: String::new(),
             cache_min_id: -1,
             cache_max_id: -1,
             cache_sort: usize::MAX,
+
             copied_notice: String::new(),
             copied_at: None,
         }
@@ -248,17 +258,46 @@ fn render_browse_tab(ui: &Ui) {
             st.page = 0;
         }
 
-        ui.set_next_item_width(280.0);
-        let mut search = st.search.clone();
+        ui.set_next_item_width(220.0);
+        let mut search = st.search_input.clone();
         let submitted = InputText::new(ui, "Search##browse_search", &mut search)
-            .hint("Name or ID")
+            .hint("Name or ID, Enter to apply")
             .flags(InputTextFlags::ENTER_RETURNS_TRUE)
             .build();
-        if st.search != search {
-            st.search = search;
-            st.page = 0;
+
+        if st.search_input != search {
+            st.search_input = search;
         }
-        refresh |= submitted;
+
+        if submitted {
+            st.search = st.search_input.clone();
+            st.page = 0;
+            refresh = true;
+        }
+
+        ui.same_line();
+        if ui.small_button("Apply##browse_search_apply") {
+            st.search = st.search_input.clone();
+            st.page = 0;
+            refresh = true;
+        }
+
+        ui.same_line();
+        ui.set_next_item_width(130.0);
+        let mut type_filter = st.type_filter.clone();
+        let type_submitted = InputText::new(ui, "Type##browse_type_filter", &mut type_filter)
+            .hint("Type/category")
+            .flags(InputTextFlags::ENTER_RETURNS_TRUE)
+            .build();
+
+        if st.type_filter != type_filter {
+            st.type_filter = type_filter;
+        }
+
+        if type_submitted {
+            st.page = 0;
+            refresh = true;
+        }
 
         ui.same_line();
         ui.set_next_item_width(90.0);
@@ -352,12 +391,13 @@ fn render_browse_tab(ui: &Ui) {
 fn refresh_cached_rows(force: bool) {
     let mut st = WORKBENCH_STATE.lock();
     let stale = force
-        || st.cache_type != st.selected_type
-        || st.cache_source_view != st.source_view
-        || st.cache_search != st.search
-        || st.cache_min_id != st.min_id
-        || st.cache_max_id != st.max_id
-        || st.cache_sort != st.sort;
+                || st.cache_type != st.selected_type
+                || st.cache_source_view != st.source_view
+                || st.cache_search != st.search
+                || st.cache_type_filter != st.type_filter
+                || st.cache_min_id != st.min_id
+                || st.cache_max_id != st.max_id
+                || st.cache_sort != st.sort;
     if !stale {
         return;
     }
@@ -370,6 +410,7 @@ fn refresh_cached_rows(force: bool) {
             .copied()
             .unwrap_or(SourceView::Merged),
         search: st.search.clone(),
+        type_filter: st.type_filter.clone(),
         min_id: st.min_id.max(0) as u32,
         max_id: if st.max_id > 0 {
             Some(st.max_id as u32)
@@ -385,6 +426,7 @@ fn refresh_cached_rows(force: bool) {
     st.cache_type = st.selected_type;
     st.cache_source_view = st.source_view;
     st.cache_search = st.search.clone();
+    st.cache_type_filter = st.type_filter.clone();
     st.cache_min_id = st.min_id;
     st.cache_max_id = st.max_id;
     st.cache_sort = st.sort;
@@ -859,19 +901,35 @@ fn render_probe_results(ui: &Ui) {
         info.resolved_content_type,
         info.content_ptr
     ));
+    match info.known_name_offset {
+        Some(off) => ui.text_disabled(format!("Known name offset: 0x{:X}", off)),
+        None => ui.text_disabled("Known name offset: <unknown>"),
+    }
+    match info.discovered_name_offset {
+        Some(off) => ui.text_disabled(format!("Discovered name offset: 0x{:X}", off)),
+        None => ui.text_disabled("Discovered name offset: <none>"),
+    }
+    match info.discovered_id_offset {
+        Some(off) => ui.text_disabled(format!("Discovered id offset: 0x{:X}", off)),
+        None => ui.text_disabled("Discovered id offset: <none>"),
+    }
     if let Some(row) = info.rows.iter().find(|r| r.offset == selected_offset) {
         ui.text_disabled(format!(
-            "Selected 0x{:X}: {} / 0x{:08X}",
-            row.offset, row.raw_u32, row.raw_u32
+            "Selected 0x{:X}: {} / 0x{:08X} bits=[{}]",
+            row.offset,
+            row.raw_u32,
+            row.raw_u32,
+            format_set_bits(row.raw_u32)
         ));
     }
 
     let flags = TableFlags::BORDERS_INNER_V | TableFlags::ROW_BG | TableFlags::RESIZABLE;
     let mut resolve_hash = None;
-    if let Some(_table) = ui.begin_table_with_flags("##probe_offsets", 5, flags) {
+    if let Some(_table) = ui.begin_table_with_flags("##probe_offsets", 6, flags) {
         ui.table_setup_column("Offset");
         ui.table_setup_column("Dec");
         ui.table_setup_column("Hex");
+        ui.table_setup_column("Bits");
         ui.table_setup_column("Hash");
         ui.table_setup_column("Resolve");
         ui.table_headers_row();
@@ -887,6 +945,8 @@ fn render_probe_results(ui: &Ui) {
             ui.text(row.raw_u32.to_string());
             ui.table_next_column();
             ui.text(format!("0x{:08X}", row.raw_u32));
+            ui.table_next_column();
+            ui.text(format_set_bits(row.raw_u32));
             ui.table_next_column();
             if row.is_hash_candidate {
                 ui.text_colored([0.45, 0.9, 0.55, 1.0], "Yes");
@@ -908,10 +968,11 @@ fn render_probe_results(ui: &Ui) {
     if !info.subdef_rows.is_empty() {
         ui.separator();
         ui.text(format!("Subdef ptr=0x{:X}", info.subdef_ptr));
-        if let Some(_table) = ui.begin_table_with_flags("##probe_subdef_offsets", 5, flags) {
+        if let Some(_table) = ui.begin_table_with_flags("##probe_subdef_offsets", 6, flags) {
             ui.table_setup_column("Offset");
             ui.table_setup_column("Dec");
             ui.table_setup_column("Hex");
+            ui.table_setup_column("Bits");
             ui.table_setup_column("Hash");
             ui.table_setup_column("Resolve");
             ui.table_headers_row();
@@ -930,6 +991,8 @@ fn render_probe_results(ui: &Ui) {
                 ui.text(row.raw_u32.to_string());
                 ui.table_next_column();
                 ui.text(format!("0x{:08X}", row.raw_u32));
+                ui.table_next_column();
+                ui.text(format_set_bits(row.raw_u32));
                 ui.table_next_column();
                 if row.is_hash_candidate {
                     ui.text_colored([0.45, 0.9, 0.55, 1.0], "Yes");
@@ -1071,5 +1134,19 @@ fn format_number(n: usize) -> String {
         format!("{},{:03}", thousands, remainder)
     } else {
         n.to_string()
+    }
+}
+
+fn format_set_bits(value: u32) -> String {
+    let mut bits = Vec::new();
+    for bit in 0..32u32 {
+        if ((value >> bit) & 1) == 1 {
+            bits.push(bit.to_string());
+        }
+    }
+    if bits.is_empty() {
+        "-".to_string()
+    } else {
+        bits.join("|")
     }
 }

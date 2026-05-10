@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -21,7 +21,7 @@ const API_ITEMS_CACHE_FILE: &str = "db_api_items.json";
 
 const LOG_PREFIX: &str = "[ingame-items]";
 
-const ITEM_CONTENT_TYPE: u32 = 34; // EContentType::ItemDef
+const ITEM_CONTENT_TYPE: u32 = 35; // EContentType::ItemDef
 const ITEM_TYPE_UPGRADE_COMPONENT: u32 = 23; // EItemType::UpgradeComponent
 const PROP_CTX_CONTENT_CTX: usize = 0xE0;
 const CONTENT_VT_COUNT_CONTENT_DEFS: usize = 0x40;
@@ -51,7 +51,7 @@ const MAP_DEF_NAME_HASH: usize = 0x168;
 const SKIN_DEF_RARITY: usize = 0x40;
 const SKIN_DEF_FLAGS: usize = 0x50;
 const SKIN_DEF_TYPE: usize = 0x80;
-const MAP_DEF_CONTENT_TYPE: u32 = 44; // EContentType::MapDef
+const MAP_DEF_CONTENT_TYPE: u32 = 45; // EContentType::MapDef
 
 const PROP_CTX_PATTERN: &str =
     "8B 0D ?? ?? ?? ?? 65 48 8B 04 25 58 00 00 00 BA ?? ?? ?? ?? 48 8B 04 C8 48 8B 04 02 C3";
@@ -69,12 +69,12 @@ const TEXT_PARSER_DEBUG_ASSERT_CALL_OFFSET: usize = 45;
 
 const ITEM_SCAN_BOOTSTRAP_TAIL: u32 = 4_096;
 const ITEM_SCAN_MAX_TRAILING_GAP: u32 = 12_000;
-const ITEM_SCAN_PER_TICK: usize = 12;
-const ITEM_SCAN_BUDGET_MS: u64 = 1;
+const ITEM_SCAN_PER_TICK: usize = 200;
+const ITEM_SCAN_BUDGET_MS: u64 = 16;
 const NAME_PARSE_BUDGET_MS: u64 = 1;
-const GAME_DATA_PER_TICK: usize = 24;
-const MAP_GAME_DATA_PER_TICK: usize = 1;
-const WARDROBE_GAME_DATA_PER_TICK: usize = 4;
+const GAME_DATA_PER_TICK: usize = 200;
+const MAP_GAME_DATA_PER_TICK: usize = 200;
+const WARDROBE_GAME_DATA_PER_TICK: usize = 200;
 const NAME_SAVE_EVERY: usize = 2000;
 const NAME_SAVE_INTERVAL_MS: u64 = 2000;
 const GAME_DATA_SAVE_EVERY: usize = 2000;
@@ -85,6 +85,13 @@ const NAME_DECODE_MAX_RETRIES: u8 = 4;
 const WARDROBE_NAME_DECODE_MAX_RETRIES: u8 = 12;
 const WARDROBE_NAME_RESOLVE_ATTEMPTS: usize = 4;
 const GAME_TYPE_NAME_DECODE_MAX_RETRIES: u8 = 2;
+const TEXT_HASH_RESOLVE_ATTEMPTS: usize = 4;
+const TEXT_HASH_QUEUE_MAX_RETRIES: u8 = 12;
+const DIRECT_DECODE_FALLBACK_ENABLED: bool = false;
+const SAFE_SKIP_NON_API_ITEM_DECODE: bool = true;
+const DEBUG_DECODE_ATTEMPTS: usize = 8;
+const DEBUG_DECODE_RETRY_WAIT_MS: u64 = 4;
+const DEBUG_AVOID_DECODETEXT_CALL: bool = true;
 const MAX_TEXT_HASH_VALUE: u32 = 0x0100_0000;
 const GAME_TEXT_RESOLVE_ENABLED: bool = true;
 
@@ -194,6 +201,8 @@ pub struct ContentProbeDebugInfo {
     pub content_def_type: u32,
     pub content_def_index: u32,
     pub known_name_offset: Option<usize>,
+    pub discovered_name_offset: Option<usize>,
+    pub discovered_id_offset: Option<usize>,
     pub rows: Vec<ContentOffsetProbeRow>,
     pub subdef_ptr: u64,
     pub subdef_rows: Vec<ContentOffsetProbeRow>,
@@ -330,6 +339,9 @@ struct State {
     names: HashMap<u32, ItemNameEntry>,
     name_failed: HashMap<u32, ItemNameFailedEntry>,
     decoded_text_by_hash: HashMap<u32, String>,
+    text_decode_fail_counts: HashMap<u32, u8>,
+    pending_text_hashes: VecDeque<u32>,
+    pending_text_hashes_set: HashSet<u32>,
     game_type_data: HashMap<String, HashMap<u32, GameTypeDataEntry>>,
     game_type_hashes: HashMap<String, HashMap<u32, ItemHashEntry>>,
     game_type_names: HashMap<String, HashMap<u32, ItemNameEntry>>,
@@ -364,6 +376,9 @@ impl Default for State {
             names: HashMap::new(),
             name_failed: HashMap::new(),
             decoded_text_by_hash: HashMap::new(),
+            text_decode_fail_counts: HashMap::new(),
+            pending_text_hashes: VecDeque::new(),
+            pending_text_hashes_set: HashSet::new(),
             game_type_data: HashMap::new(),
             game_type_hashes: HashMap::new(),
             game_type_names: HashMap::new(),
@@ -398,6 +413,16 @@ impl State {
         if let Some(saved) = self.names.get(&id) {
             if !saved.name.trim().is_empty() {
                 incoming.name = saved.name.clone();
+            }
+        }
+        if is_placeholder_name(&incoming.name) {
+            if let Some(api_name) = self
+                .api_names
+                .get(&id)
+                .map(|n| n.trim())
+                .filter(|n| !n.is_empty())
+            {
+                incoming.name = api_name.to_string();
             }
         }
 
@@ -648,7 +673,7 @@ pub fn parse_names_from_hashes(include_api_named: bool, include_descriptions: bo
 
 pub fn full_rebuild_names_from_hashes(include_api_named: bool, include_descriptions: bool) {
     reset_item_name_results(include_descriptions);
-    start_name_parse(false, include_api_named, include_descriptions);
+    start_name_parse(true, include_api_named, include_descriptions);
 }
 
 pub fn parse_game_type_names_from_hashes(link_type: encoder::LinkType) {
@@ -657,7 +682,7 @@ pub fn parse_game_type_names_from_hashes(link_type: encoder::LinkType) {
 
 pub fn full_rebuild_game_type_names_from_hashes(link_type: encoder::LinkType) {
     reset_game_type_name_results(link_type);
-    start_game_type_name_parse(link_type, false);
+    start_game_type_name_parse(link_type, true);
 }
 
 pub fn parse_map_names_from_hashes() {
@@ -666,7 +691,7 @@ pub fn parse_map_names_from_hashes() {
 
 pub fn full_rebuild_map_names_from_hashes() {
     reset_map_name_results();
-    start_map_name_parse(false);
+    start_map_name_parse(true);
 }
 
 fn reset_item_name_results(include_descriptions: bool) {
@@ -679,6 +704,9 @@ fn reset_item_name_results(include_descriptions: bool) {
     s.names.clear();
     s.name_failed.clear();
     s.decoded_text_by_hash.clear();
+    s.text_decode_fail_counts.clear();
+    s.pending_text_hashes.clear();
+    s.pending_text_hashes_set.clear();
     for entry in &mut s.entries {
         entry.name = format!("Item #{}", entry.id);
         entry.upgrade_name.clear();
@@ -700,6 +728,9 @@ fn reset_game_type_name_results(link_type: encoder::LinkType) {
 
     let type_name = link_type.name().to_string();
     s.decoded_text_by_hash.clear();
+    s.text_decode_fail_counts.clear();
+    s.pending_text_hashes.clear();
+    s.pending_text_hashes_set.clear();
     if let Some(names) = s.game_type_names.get_mut(&type_name) {
         names.clear();
     }
@@ -720,6 +751,9 @@ fn reset_map_name_results() {
 
     let type_name = encoder::LinkType::Map.name().to_string();
     s.decoded_text_by_hash.clear();
+    s.text_decode_fail_counts.clear();
+    s.pending_text_hashes.clear();
+    s.pending_text_hashes_set.clear();
     if let Some(rows) = s.game_type_data.get_mut(&type_name) {
         for row in rows.values_mut() {
             row.map_name.clear();
@@ -755,6 +789,16 @@ fn start_name_parse(
         .filter(|h| should_decode_name_id(&s, h.id, include_already_decoded, include_api_named))
         .map(|h| h.id)
         .collect();
+    // Also include retryable placeholders from current item rows even when hashes are missing.
+    // This lets parse finalize names via skin/base-upgrade/API fallbacks instead of hard-stopping
+    // at only the hashed subset.
+    ids.extend(
+        s.entries
+            .iter()
+            .filter(|e| should_decode_name_id(&s, e.id, include_already_decoded, include_api_named))
+            .filter(|e| is_retryable_parse_name(&e.name))
+            .map(|e| e.id),
+    );
     ids.sort_unstable();
     ids.dedup();
     if ids.is_empty() {
@@ -1159,6 +1203,9 @@ pub fn consume_debug_resolve_result() -> Option<Result<DebugResolveResult, Strin
 fn is_unresolved_decoded_text(text: &str) -> bool {
     let t = text.trim();
     if t.is_empty() {
+        return true;
+    }
+    if is_item_numeric_placeholder(t) {
         return true;
     }
 
@@ -1708,6 +1755,8 @@ pub fn tick() {
         return;
     };
 
+    unsafe { process_decode_queue(&mut s, prop_ctx, name_decodes_per_tick()) };
+
     // Prioritize debug resolve jobs so UI actions are not starved by long parse jobs.
     if let Some((link_type, id, content_type_override, offset)) = s.debug_resolve_job.take() {
         let res = (|| unsafe {
@@ -1755,25 +1804,9 @@ pub fn tick() {
                 ));
             }
 
-            let mut decoded_text = None;
-            for _ in 0..3 {
-                let attempt = decode_text_hash(&s, raw_u32, prop_ctx)
-                    .map(|t| t.trim().to_string())
-                    .filter(|t| !is_unresolved_decoded_text(t));
-                if attempt.is_some() {
-                    decoded_text = attempt;
-                    break;
-                }
-            }
+            let decoded_text = decode_debug_text_hash_with_retries(&mut s, raw_u32, prop_ctx);
 
-            let coded_text = {
-                let coded_ptr = resolve_coded_text_ptr(&s, raw_u32, prop_ctx);
-                if coded_ptr.is_null() {
-                    String::new()
-                } else {
-                    read_wide_string(coded_ptr, 1024).unwrap_or_default()
-                }
-            };
+            let coded_text = String::new();
 
             if decoded_text.is_none() && coded_text.is_empty() {
                 return Err("resolve_text_hash/decode_text failed".to_string());
@@ -1802,27 +1835,9 @@ pub fn tick() {
                 ));
             }
 
-            let mut decoded_text = None;
-            for _ in 0..3 {
-                let attempt = decode_text_hash(&s, raw_u32, prop_ctx)
-                    .map(|t| t.trim().to_string())
-                    .filter(|t| !is_unresolved_decoded_text(t));
-                if attempt.is_some() {
-                    decoded_text = attempt;
-                    break;
-                }
-            }
+            let mut decoded_text = decode_debug_text_hash_with_retries(&mut s, raw_u32, prop_ctx);
 
-            let coded_text = {
-                let coded_ptr = resolve_coded_text_ptr(&s, raw_u32, prop_ctx);
-                if coded_ptr.is_null() {
-                    String::new()
-                } else {
-                    read_wide_string(coded_ptr, 1024).unwrap_or_default()
-                }
-            };
-
-            let mut coded_text = coded_text;
+            let mut coded_text = String::new();
             // Subdef fallback: TextHash(0x60/0x70) has adjacent CodedText pointer at -0x8.
             if decoded_text.is_none() && coded_text.is_empty() {
                 if let Some(src) = source_ptr {
@@ -1876,7 +1891,7 @@ pub fn tick() {
             return;
         };
 
-        let (get_content_by_index, _, _) = unsafe {
+        let (_get_content_by_index, count_defs, iterate_content_defs) = unsafe {
             match resolve_content_vfuncs(content_ctx) {
                 Some(v) => v,
                 None => {
@@ -1886,22 +1901,49 @@ pub fn tick() {
             }
         };
 
+        if job.end_id == 0 {
+            let total = unsafe { count_defs(content_ctx, ITEM_CONTENT_TYPE) };
+            if total <= 0 {
+                s.error_msg = format!("ItemDef count_defs returned {}", total);
+                s.status = DbStatus::Error;
+                s.scan = None;
+                return;
+            }
+
+            job.end_id = total as u32;
+            job.current_id = 0;
+
+            db::log_debug(&format!(
+                "{} ItemDef table count_defs = {}",
+                LOG_PREFIX, job.end_id
+            ));
+        }
+
         let scan_started = Instant::now();
         for _ in 0..ITEM_SCAN_PER_TICK {
-            if job.current_id > job.end_id {
+            if job.processed as u32 >= job.end_id {
                 break;
             }
             if scan_started.elapsed() >= Duration::from_millis(ITEM_SCAN_BUDGET_MS) {
                 break;
             }
 
-            let id = job.current_id;
-            job.current_id = job.current_id.saturating_add(1);
+            let mut iter_index = job.current_id;
+            let item_ptr = unsafe {
+                iterate_content_defs(
+                    content_ctx,
+                    ITEM_CONTENT_TYPE,
+                    &mut iter_index as *mut u32,
+                )
+            };
+
+            job.current_id = iter_index;
             job.processed = job.processed.saturating_add(1);
-            let item_ptr = unsafe { get_content_by_index(content_ctx, ITEM_CONTENT_TYPE, id) };
+
             if item_ptr.is_null() {
-                continue;
+                break;
             }
+
             if let Some((
                 entry,
                 content_index,
@@ -1909,12 +1951,10 @@ pub fn tick() {
                 description_hash,
                 upgrade_name_hash,
                 base_upgrade_item_id,
-            )) = unsafe { read_item_entry(&s, item_ptr, id) }
+            )) = unsafe { read_item_entry(&s, item_ptr, 0) }
             {
                 job.last_found_id = job.last_found_id.max(entry.id);
-                job.end_id = job
-                    .end_id
-                    .max(job.last_found_id.saturating_add(job.trailing_gap));
+
                 if matches!(job.mode, JobMode::Rebuild) || !s.entry_index.contains_key(&entry.id) {
                     s.upsert_entry(
                         entry,
@@ -1929,9 +1969,9 @@ pub fn tick() {
             }
         }
 
-        let done = job.current_id > job.end_id;
+        let done = job.processed as u32 >= job.end_id || job.current_id == u32::MAX;
 
-        let total = job.end_id.saturating_sub(job.start_id).saturating_add(1) as usize;
+        let total = job.end_id.max(1) as usize;
         s.progress = Some((job.processed.min(total), total));
 
         if done {
@@ -1979,6 +2019,48 @@ pub fn tick() {
             if job.finalized_ids.contains(&id) {
                 continue;
             }
+            let api_name_for_id = s
+                .api_names
+                .get(&id)
+                .map(|n| n.trim().to_string())
+                .filter(|n| !n.is_empty());
+            if SAFE_SKIP_NON_API_ITEM_DECODE && api_name_for_id.is_none() {
+                let mut safe_name = s
+                    .entry_index
+                    .get(&id)
+                    .and_then(|&idx| s.entries.get(idx))
+                    .map(|e| e.name.trim().to_string())
+                    .filter(|n| !n.is_empty() && !is_placeholder_name(n));
+                if safe_name.is_none() {
+                    safe_name = s
+                        .names
+                        .get(&id)
+                        .map(|n| n.name.trim().to_string())
+                        .filter(|n| !n.is_empty() && !is_placeholder_name(n));
+                }
+                let name = safe_name.unwrap_or_else(|| format!("Item #{}", id));
+                let ts = now_unix();
+                s.names.insert(
+                    id,
+                    ItemNameEntry {
+                        id,
+                        name: name.clone(),
+                        last_seen_unix: ts,
+                    },
+                );
+                if let Some(idx) = s.entry_index.get(&id).copied() {
+                    if let Some(entry) = s.entries.get_mut(idx) {
+                        entry.name = name;
+                    }
+                }
+                job.pending_flush = job.pending_flush.saturating_add(1);
+                job.retry_counts.remove(&id);
+                s.name_failed.remove(&id);
+                if job.finalized_ids.insert(id) {
+                    job.base_finalized = job.base_finalized.saturating_add(1);
+                }
+                continue;
+            }
             let name_hash = s.hashes.get(&id).map(|h| h.name_hash).unwrap_or(0);
             let upgrade_name_hash = s.hashes.get(&id).map(|h| h.upgrade_name_hash).unwrap_or(0);
             let item_type_code = s
@@ -1990,32 +2072,40 @@ pub fn tick() {
             let can_use_skin_fallback = matches!(item_type_code, 0 | 24); // Armor | Weapon
             let is_upgrade_item = item_type_code == ITEM_TYPE_UPGRADE_COMPONENT;
 
-            if let Some((content_ctx, get_content_by_index)) = item_content_access {
-                let fallback_skin_id = s
-                    .entry_index
-                    .get(&id)
-                    .and_then(|&idx| s.entries.get(idx))
-                    .map(|e| e.default_skin_id)
-                    .unwrap_or(0);
-                let fallback_base_upgrade = s
-                    .hashes
-                    .get(&id)
-                    .map(|h| h.base_upgrade_item_id)
-                    .unwrap_or(0);
-                if fallback_skin_id == 0 || fallback_base_upgrade == 0 {
-                    unsafe {
-                        refresh_item_fallback_ids(&mut s, id, content_ctx, get_content_by_index)
-                    };
+            if can_use_skin_fallback || is_upgrade_item {
+                if let Some((content_ctx, get_content_by_index)) = item_content_access {
+                    let fallback_skin_id = s
+                        .entry_index
+                        .get(&id)
+                        .and_then(|&idx| s.entries.get(idx))
+                        .map(|e| e.default_skin_id)
+                        .unwrap_or(0);
+                    let fallback_base_upgrade = s
+                        .hashes
+                        .get(&id)
+                        .map(|h| h.base_upgrade_item_id)
+                        .unwrap_or(0);
+                    if fallback_skin_id == 0 || fallback_base_upgrade == 0 {
+                        unsafe {
+                            refresh_item_fallback_ids(
+                                &mut s,
+                                id,
+                                content_ctx,
+                                get_content_by_index,
+                            )
+                        };
+                    }
                 }
             }
-            let decoded = if name_hash != 0 {
+            // API-backed item names are stable and avoid risky live decode paths that can hard-freeze
+            // the game on specific hashes/content rows.
+            let decoded = if api_name_for_id.is_some() {
+                None
+            } else if name_hash != 0 {
                 if let Some(cached) = s.decoded_text_by_hash.get(&name_hash).cloned() {
                     Some(cached)
                 } else {
-                    let out = unsafe {
-                        decode_text_hash(&s, name_hash, prop_ctx)
-                            .or_else(|| resolve_text_hash_coded_only(&s, name_hash, prop_ctx))
-                    };
+                    let out = unsafe { decode_text_hash_queued(&mut s, name_hash, prop_ctx) };
                     if let Some(ref text) = out {
                         if !text.trim().is_empty() && !is_unresolved_decoded_text(text) {
                             s.decoded_text_by_hash.insert(name_hash, text.clone());
@@ -2079,6 +2169,12 @@ pub fn tick() {
                 }
             }
 
+            // If API already has a stable name for this item, use it immediately and skip
+            // extra live-text retries that can keep placeholder names around.
+            if name.is_none() {
+                name = api_name_for_id.clone();
+            }
+
             if name.is_none() {
                 let tries = job.retry_counts.entry(id).or_insert(0);
                 if *tries < NAME_DECODE_MAX_RETRIES {
@@ -2108,8 +2204,9 @@ pub fn tick() {
                         .get(idx)
                         .map(|e| !e.description.trim().is_empty())
                         .unwrap_or(false);
-                    let should_decode_desc =
-                        description_hash != 0 && (job.full_rebuild || !has_existing_desc);
+                    let should_decode_desc = api_name_for_id.is_none()
+                        && description_hash != 0
+                        && (job.full_rebuild || !has_existing_desc);
                     if should_decode_desc {
                         let decoded_desc = if let Some(cached) =
                             s.decoded_text_by_hash.get(&description_hash).cloned()
@@ -2117,9 +2214,7 @@ pub fn tick() {
                             Some(cached)
                         } else {
                             let out = unsafe {
-                                decode_text_hash(&s, description_hash, prop_ctx).or_else(|| {
-                                    resolve_text_hash_coded_only(&s, description_hash, prop_ctx)
-                                })
+                                decode_text_hash_queued(&mut s, description_hash, prop_ctx)
                             };
                             if let Some(ref text) = out {
                                 if !text.trim().is_empty() && !is_unresolved_decoded_text(text) {
@@ -2141,11 +2236,8 @@ pub fn tick() {
                     if let Some(cached) = s.decoded_text_by_hash.get(&upgrade_name_hash).cloned() {
                         Some(cached)
                     } else {
-                        let out = unsafe {
-                            decode_text_hash(&s, upgrade_name_hash, prop_ctx).or_else(|| {
-                                resolve_text_hash_coded_only(&s, upgrade_name_hash, prop_ctx)
-                            })
-                        };
+                        let out =
+                            unsafe { decode_text_hash_queued(&mut s, upgrade_name_hash, prop_ctx) };
                         if let Some(ref text) = out {
                             if !text.trim().is_empty() && !is_unresolved_decoded_text(text) {
                                 s.decoded_text_by_hash
@@ -2401,10 +2493,7 @@ pub fn tick() {
                     }
                     out
                 } else {
-                    let out = unsafe {
-                        decode_text_hash(&s, name_hash, prop_ctx)
-                            .or_else(|| resolve_text_hash_coded_only(&s, name_hash, prop_ctx))
-                    };
+                    let out = unsafe { decode_text_hash_queued(&mut s, name_hash, prop_ctx) };
                     if let Some(ref text) = out {
                         if !text.trim().is_empty() && !is_unresolved_decoded_text(text) {
                             s.decoded_text_by_hash.insert(name_hash, text.clone());
@@ -2562,10 +2651,7 @@ pub fn tick() {
                 if let Some(cached) = s.decoded_text_by_hash.get(&map_name_hash).cloned() {
                     Some(cached)
                 } else {
-                    let out = unsafe {
-                        decode_text_hash(&s, map_name_hash, prop_ctx)
-                            .or_else(|| resolve_text_hash_coded_only(&s, map_name_hash, prop_ctx))
-                    };
+                    let out = unsafe { decode_text_hash_queued(&mut s, map_name_hash, prop_ctx) };
                     if let Some(ref text) = out {
                         if !text.trim().is_empty() && !is_unresolved_decoded_text(text) {
                             s.decoded_text_by_hash.insert(map_name_hash, text.clone());
@@ -2949,6 +3035,13 @@ pub fn tick() {
                         }
                         if resolved_name.trim().is_empty()
                             || is_unresolved_decoded_text(&resolved_name)
+                            || is_generic_placeholder_name(&resolved_name, task.link_type)
+                        {
+                            resolved_name = task.api_name.clone();
+                        }
+
+                        if resolved_name.trim().is_empty()
+                            || is_unresolved_decoded_text(&resolved_name)
                         {
                             resolved_name = format!("{} #{}", task.link_type.name(), task.id);
                         }
@@ -3072,6 +3165,45 @@ pub fn tick() {
     }
 }
 
+fn decode_debug_text_hash_with_retries(
+    state: &mut State,
+    text_hash: u32,
+    prop_ctx: *const u8,
+) -> Option<String> {
+    for _ in 0..DEBUG_DECODE_ATTEMPTS {
+        if let Some(cached) = state.decoded_text_by_hash.get(&text_hash).cloned() {
+            let cleaned = cached.trim().to_string();
+            if !cleaned.is_empty() && !is_unresolved_decoded_text(&cleaned) {
+                return Some(cleaned);
+            }
+        }
+
+        unsafe {
+            enqueue_text_hash_for_decode(state, text_hash);
+            process_decode_queue(state, prop_ctx, 1);
+        }
+        std::thread::sleep(Duration::from_millis(DEBUG_DECODE_RETRY_WAIT_MS));
+    }
+    None
+}
+
+unsafe fn decode_text_hash_decoded_first(
+    state: &State,
+    text_hash: u32,
+    prop_ctx: *const u8,
+) -> Option<String> {
+    if !is_plausible_text_hash(text_hash) {
+        return None;
+    }
+    let coded = resolve_coded_text_ptr(state, text_hash, prop_ctx);
+    if coded.is_null() {
+        return None;
+    }
+
+    // Prefer true decoded text. Interpreting coded text directly can yield garbage like "宽".
+    decode_coded_text(state.pointers.decode_text_fn, coded).or_else(|| read_clean_coded_text(coded))
+}
+
 pub fn search(query: &str, only_api: bool, max_results: usize) -> Vec<SearchResult> {
     let q = query.trim().to_lowercase();
     let s = STATE.lock();
@@ -3100,39 +3232,30 @@ pub fn get_item(id: u32) -> Option<InGameItem> {
     s.entries.iter().find(|e| e.id == id).cloned()
 }
 
-fn start_job(state: &mut State, mode: JobMode, start_id: u32, seed_last_found_id: u32) {
+fn start_job(state: &mut State, mode: JobMode, _start_id: u32, _seed_last_found_id: u32) {
     ensure_scan_pointers(state);
-
-    let start_id = start_id.max(1);
-    let last_game_id =
-        seed_last_found_id.max(state.entries.iter().map(|e| e.id).max().unwrap_or(0));
-    let high_item_hint = state
-        .api_ids
-        .iter()
-        .copied()
-        .max()
-        .unwrap_or_else(|| encoder::LinkType::Item.default_start());
-    let frontier = last_game_id.max(high_item_hint);
-    let trailing_gap = item_scan_trailing_gap(&state.entries);
-    let end_id = frontier
-        .saturating_add(trailing_gap)
-        .max(start_id.saturating_add(trailing_gap));
-    let total = end_id.saturating_sub(start_id).saturating_add(1);
 
     state.scan = Some(ScanJob {
         mode,
-        start_id,
-        current_id: start_id,
-        end_id,
-        last_found_id: frontier,
-        trailing_gap,
+        start_id: 0,
+        current_id: 0,
+        end_id: 0, // filled by count_defs() in tick()
+        last_found_id: 0,
+        trailing_gap: 0,
         processed: 0,
         added: 0,
     });
 
+    state.status = match mode {
+        JobMode::Rebuild => DbStatus::Loading,
+        JobMode::Update => DbStatus::Updating,
+    };
+    state.progress = Some((0, 1));
+    state.error_msg.clear();
+
     db::log_debug(&format!(
-        "{} started {:?}: probing item ids {}..{} ({} ids, trailing gap {})",
-        LOG_PREFIX, mode, start_id, end_id, total, trailing_gap
+        "{} started {:?}: iterating ItemDef content table",
+        LOG_PREFIX, mode
     ));
 }
 
@@ -3204,7 +3327,12 @@ fn sanitize_loaded_names(state: &mut State) {
         .retain(|_, n| !is_unresolved_decoded_text(&n.name));
     for entry in &mut state.entries {
         if is_unresolved_decoded_text(&entry.name) {
-            entry.name = format!("Item #{}", entry.id);
+            entry.name = state
+                .api_names
+                .get(&entry.id)
+                .map(|n| n.trim().to_string())
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| format!("Item #{}", entry.id));
         }
         if is_unresolved_decoded_text(&entry.description) {
             entry.description.clear();
@@ -3226,12 +3354,37 @@ fn sanitize_loaded_names(state: &mut State) {
 }
 
 fn is_placeholder_name(name: &str) -> bool {
-    name.trim_start().starts_with("Item #")
+    let t = name.trim();
+    is_item_numeric_placeholder(t)
+}
+
+fn is_item_numeric_placeholder(name: &str) -> bool {
+    let t = name.trim();
+    if let Some(rest) = t.strip_prefix("Item #") {
+        return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit());
+    }
+    if let Some(rest) = t.strip_prefix("Item#") {
+        return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit());
+    }
+    if let Some(rest) = t.strip_prefix("Item ") {
+        return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit());
+    }
+    false
 }
 
 fn is_generic_placeholder_name(name: &str, link_type: encoder::LinkType) -> bool {
-    let t = name.trim_start();
-    t.starts_with("Item #") || t.starts_with(&format!("{} #", link_type.name()))
+    if is_placeholder_name(name) {
+        return true;
+    }
+    let t = name.trim();
+    let type_name = link_type.name();
+    if let Some(rest) = t.strip_prefix(&format!("{} #", type_name)) {
+        return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit());
+    }
+    if let Some(rest) = t.strip_prefix(&format!("{}#", type_name)) {
+        return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit());
+    }
+    false
 }
 
 fn save_hashes_cache(hashes: &HashMap<u32, ItemHashEntry>) {
@@ -3334,6 +3487,13 @@ pub fn parse_game_data_for_link_type(link_type: encoder::LinkType) {
             .and_then(|m| m.get(&id))
             .map(|n| n.name.clone())
             .unwrap_or_default();
+        if decoded_name.trim().is_empty()
+            || is_unresolved_decoded_text(&decoded_name)
+            || is_generic_placeholder_name(&decoded_name, link_type)
+        {
+            decoded_name = api_name.clone();
+        }
+
         if decoded_name.trim().is_empty() || is_unresolved_decoded_text(&decoded_name) {
             decoded_name = format!("{} #{}", link_type.name(), id);
         }
@@ -3525,7 +3685,7 @@ pub fn debug_probe_content_for_content_type(
         ));
     }
 
-    if unsafe { !is_readable(ptr, 0x90) } {
+    if unsafe { !is_readable(ptr, CONTENT_DEF_INDEX + std::mem::size_of::<u32>()) } {
         return Err("Content ptr is not readable".to_string());
     }
 
@@ -3548,6 +3708,10 @@ pub fn debug_probe_content_for_content_type(
     let soft_cap = ((observed_max_hash as u64 * 3) / 2 + 8192) as u32;
     let hard_cap = soft_cap.saturating_mul(4);
 
+    let type_name = link_type.name().to_string();
+    let discovered_name_offset = s.discovered_name_hash_offsets.get(&type_name).copied();
+    let discovered_id_offset = s.discovered_id_offsets.get(&type_name).copied();
+
     let mut rows = Vec::new();
     let is_known_hash_for_selected_type = |h: u32| -> bool {
         if h == 0 {
@@ -3567,7 +3731,10 @@ pub fn debug_probe_content_for_content_type(
             })
             .unwrap_or(false)
     };
-    for offset in (0x20usize..=0x88usize).step_by(4) {
+    for offset in (0x0usize..=0x200usize).step_by(4) {
+        if unsafe { !is_readable(ptr, offset + std::mem::size_of::<u32>()) } {
+            continue;
+        }
         let raw_u32 = unsafe { (ptr.add(offset) as *const u32).read_unaligned() };
         // Fallback pattern for types with no stored hashes:
         // - exclude zero/self-id/pointer-like values
@@ -3601,6 +3768,8 @@ pub fn debug_probe_content_for_content_type(
         content_def_type,
         content_def_index,
         known_name_offset: known_name_hash_offset_for_link_type(link_type),
+        discovered_name_offset,
+        discovered_id_offset,
         rows,
         subdef_ptr: 0,
         subdef_rows: Vec::new(),
@@ -3668,12 +3837,15 @@ pub fn debug_probe_item_subdef_for_content_type(
     if subdef_ptr.is_null() {
         return Err("Item subdef pointer is null".to_string());
     }
-    if unsafe { !is_readable(subdef_ptr, 0xA4) } {
+    if unsafe { !is_readable(subdef_ptr, std::mem::size_of::<u32>()) } {
         return Err("Item subdef pointer is not readable".to_string());
     }
 
     let mut rows = Vec::new();
-    for offset in (0x0usize..=0xA0usize).step_by(4) {
+    for offset in (0x0usize..=0x200usize).step_by(4) {
+        if unsafe { !is_readable(subdef_ptr, offset + std::mem::size_of::<u32>()) } {
+            continue;
+        }
         let raw_u32 = unsafe { (subdef_ptr.add(offset) as *const u32).read_unaligned() };
         // Subdef debug should stay strict: only expose known text-hash slots
         // used for upgrade-like subdefs. This avoids noisy false positives.
@@ -3696,13 +3868,13 @@ pub fn debug_probe_item_subdef_for_content_type(
 
 fn link_type_to_content_type(link_type: encoder::LinkType) -> Option<u32> {
     match link_type {
-        encoder::LinkType::Item => Some(34),     // ItemDef
-        encoder::LinkType::Map => Some(51),      // PointOfInterestDef (waypoints/POI)
-        encoder::LinkType::Skill => Some(63),    // SkillDef
-        encoder::LinkType::Trait => Some(79),    // TraitDef
-        encoder::LinkType::Recipe => Some(13),   // CraftingRecipeDef
-        encoder::LinkType::Wardrobe => Some(65), // SkinDef
-        encoder::LinkType::Outfit => Some(50),   // OutfitDef
+        encoder::LinkType::Item => Some(35),     // ItemDef
+        encoder::LinkType::Map => Some(52),      // PointOfInterestDef (waypoints/POI)
+        encoder::LinkType::Skill => Some(64),    // SkillDef
+        encoder::LinkType::Trait => Some(77),    // TraitDef
+        encoder::LinkType::Recipe => Some(12),   // CraftingRecipeDef
+        encoder::LinkType::Wardrobe => Some(66), // SkinDef
+        encoder::LinkType::Outfit => Some(51),   // OutfitDef
     }
 }
 
@@ -4206,7 +4378,7 @@ unsafe fn read_item_default_skin_id(item_ptr: *const u8) -> u32 {
         return 0;
     }
 
-    let expected_skin_type = link_type_to_content_type(encoder::LinkType::Wardrobe).unwrap_or(65);
+    let expected_skin_type = link_type_to_content_type(encoder::LinkType::Wardrobe).unwrap_or(66);
     if is_readable(skin_ptr, CONTENT_DEF_TYPE + std::mem::size_of::<u32>()) {
         let c_type = (skin_ptr.add(CONTENT_DEF_TYPE) as *const u32).read_unaligned();
         if c_type != expected_skin_type {
@@ -4415,7 +4587,7 @@ fn normalize_decoded_name_for_match(name: &str) -> String {
 }
 
 unsafe fn decode_text_hash_at_offset(
-    state: &State,
+    state: &mut State,
     ptr: *const u8,
     offset: usize,
     prop_ctx: *const u8,
@@ -4427,7 +4599,7 @@ unsafe fn decode_text_hash_at_offset(
     if !is_plausible_text_hash(text_hash) {
         return None;
     }
-    let decoded = decode_text_hash(state, text_hash, prop_ctx)?;
+    let decoded = decode_debug_text_hash_with_retries(state, text_hash, prop_ctx)?;
     let decoded = decoded.trim();
     if decoded.is_empty() || is_unresolved_decoded_text(decoded) {
         return None;
@@ -4443,16 +4615,18 @@ unsafe fn resolve_text_hash_coded_only(
     if !is_plausible_text_hash(text_hash) {
         return None;
     }
-    let coded_ptr = resolve_coded_text_ptr(state, text_hash, prop_ctx);
-    if coded_ptr.is_null() {
-        return None;
+    for _ in 0..TEXT_HASH_RESOLVE_ATTEMPTS {
+        let coded_ptr = resolve_coded_text_ptr(state, text_hash, prop_ctx);
+        if coded_ptr.is_null() {
+            continue;
+        }
+        let text = read_wide_string(coded_ptr, 1024)?;
+        let trimmed = text.trim();
+        if !trimmed.is_empty() && !is_unresolved_decoded_text(trimmed) {
+            return Some(trimmed.to_string());
+        }
     }
-    let text = read_wide_string(coded_ptr, 1024)?;
-    let trimmed = text.trim();
-    if trimmed.is_empty() || is_unresolved_decoded_text(trimmed) {
-        return None;
-    }
-    Some(trimmed.to_string())
+    None
 }
 
 unsafe fn discover_name_hash_offset_for_link_type(
@@ -4636,12 +4810,92 @@ unsafe fn decode_text_hash(state: &State, text_hash: u32, prop_ctx: *const u8) -
     if !is_plausible_text_hash(text_hash) {
         return None;
     }
-    let coded = resolve_coded_text_ptr(state, text_hash, prop_ctx);
-    if coded.is_null() {
+    for _ in 0..TEXT_HASH_RESOLVE_ATTEMPTS {
+        let coded = resolve_coded_text_ptr(state, text_hash, prop_ctx);
+        if coded.is_null() {
+            continue;
+        }
+        if let Some(text) = read_clean_coded_text(coded) {
+            return Some(text);
+        }
+        if DIRECT_DECODE_FALLBACK_ENABLED {
+            if let Some(text) = decode_coded_text(state.pointers.decode_text_fn, coded) {
+                return Some(text);
+            }
+        }
+    }
+    None
+}
+
+fn enqueue_text_hash_for_decode(state: &mut State, text_hash: u32) {
+    if !is_plausible_text_hash(text_hash) {
+        return;
+    }
+    if state.decoded_text_by_hash.contains_key(&text_hash) {
+        return;
+    }
+    if state
+        .text_decode_fail_counts
+        .get(&text_hash)
+        .copied()
+        .unwrap_or(0)
+        >= TEXT_HASH_QUEUE_MAX_RETRIES
+    {
+        return;
+    }
+    if state.pending_text_hashes_set.insert(text_hash) {
+        state.pending_text_hashes.push_back(text_hash);
+    }
+}
+
+unsafe fn decode_text_hash_queued(
+    state: &mut State,
+    text_hash: u32,
+    _prop_ctx: *const u8,
+) -> Option<String> {
+    if !is_plausible_text_hash(text_hash) {
         return None;
     }
+    if let Some(cached) = state.decoded_text_by_hash.get(&text_hash).cloned() {
+        return Some(cached);
+    }
+    enqueue_text_hash_for_decode(state, text_hash);
+    None
+}
 
-    read_clean_coded_text(coded).or_else(|| decode_coded_text(state.pointers.decode_text_fn, coded))
+unsafe fn process_decode_queue(state: &mut State, prop_ctx: *const u8, max_per_tick: usize) {
+    if max_per_tick == 0 || state.pending_text_hashes.is_empty() {
+        return;
+    }
+    for _ in 0..max_per_tick {
+        let Some(text_hash) = state.pending_text_hashes.pop_front() else {
+            break;
+        };
+        state.pending_text_hashes_set.remove(&text_hash);
+        if state.decoded_text_by_hash.contains_key(&text_hash) {
+            continue;
+        }
+        let out = decode_text_hash(state, text_hash, prop_ctx)
+            .or_else(|| resolve_text_hash_coded_only(state, text_hash, prop_ctx));
+        let mut accepted = false;
+        if let Some(text) = out {
+            if !text.trim().is_empty() && !is_unresolved_decoded_text(&text) {
+                state.decoded_text_by_hash.insert(text_hash, text);
+                state.text_decode_fail_counts.remove(&text_hash);
+                accepted = true;
+            }
+        }
+        if !accepted {
+            let should_retry = {
+                let fails = state.text_decode_fail_counts.entry(text_hash).or_insert(0);
+                *fails = fails.saturating_add(1);
+                *fails < TEXT_HASH_QUEUE_MAX_RETRIES
+            };
+            if should_retry {
+                enqueue_text_hash_for_decode(state, text_hash);
+            }
+        }
+    }
 }
 
 unsafe fn decode_text_hash_with_pointers(
@@ -4660,20 +4914,29 @@ unsafe fn decode_text_hash_with_pointers(
     type ResolveTextHashFn = unsafe extern "C" fn(u32, u32) -> *const u16;
     let resolve: ResolveTextHashFn = std::mem::transmute(pointers.resolve_text_hash_fn);
     let run_resolve = || resolve(text_hash, 0);
-    let coded = with_text_parser_assert_suppressed(|| {
-        if !pointers.prop_ctx_getter.is_null() {
-            with_prop_ctx_installed(pointers.prop_ctx_getter, prop_ctx, run_resolve)
-                .unwrap_or(std::ptr::null())
-        } else {
-            run_resolve()
+    for _ in 0..TEXT_HASH_RESOLVE_ATTEMPTS {
+        let coded = with_text_parser_assert_suppressed(|| {
+            if !pointers.prop_ctx_getter.is_null() {
+                with_prop_ctx_installed(pointers.prop_ctx_getter, prop_ctx, run_resolve)
+                    .unwrap_or(std::ptr::null())
+            } else {
+                run_resolve()
+            }
+        })
+        .unwrap_or(std::ptr::null());
+        if coded.is_null() {
+            continue;
         }
-    })
-    .unwrap_or(std::ptr::null());
-    if coded.is_null() {
-        return None;
+        if let Some(text) = read_clean_coded_text(coded) {
+            return Some(text);
+        }
+        if DIRECT_DECODE_FALLBACK_ENABLED {
+            if let Some(text) = decode_coded_text(pointers.decode_text_fn, coded) {
+                return Some(text);
+            }
+        }
     }
-
-    read_clean_coded_text(coded).or_else(|| decode_coded_text(pointers.decode_text_fn, coded))
+    None
 }
 
 unsafe fn read_clean_coded_text(coded: *const u16) -> Option<String> {
@@ -4684,6 +4947,12 @@ unsafe fn read_clean_coded_text(coded: *const u16) -> Option<String> {
 
 unsafe fn decode_coded_text(decode_text_fn: *mut u8, coded: *const u16) -> Option<String> {
     if coded.is_null() || decode_text_fn.is_null() || !is_executable(decode_text_fn as *const u8) {
+        return None;
+    }
+    if !is_readable(coded as *const u8, std::mem::size_of::<u16>()) {
+        return None;
+    }
+    if *coded == 0 {
         return None;
     }
 

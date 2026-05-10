@@ -1536,6 +1536,20 @@ fn render_debug_probe_tab(ui: &Ui) {
         Some(off) => ui.text_disabled(format!("Known name offset for this type: 0x{:X}", off)),
         None => ui.text_disabled("Known name offset for this type: <unknown>"),
     }
+    match info.discovered_name_offset {
+        Some(off) => ui.text_disabled(format!(
+            "Discovered name offset from previous scans: 0x{:X}",
+            off
+        )),
+        None => ui.text_disabled("Discovered name offset from previous scans: <none>"),
+    }
+    match info.discovered_id_offset {
+        Some(off) => ui.text_disabled(format!(
+            "Discovered id offset from previous scans: 0x{:X}",
+            off
+        )),
+        None => ui.text_disabled("Discovered id offset from previous scans: <none>"),
+    }
 
     ui.text_disabled("Offset table is raw only. No text resolve/decode is performed.");
     if ui.small_button("Copy Full Dump##debug_probe_copy_dump") {
@@ -1555,25 +1569,37 @@ fn render_debug_probe_tab(ui: &Ui) {
         } else {
             dump.push_str("KnownNameOffset=<unknown>\n");
         }
-        dump.push_str("offset,dec,hex,possible_hash\n");
+        if let Some(off) = info.discovered_name_offset {
+            dump.push_str(&format!("DiscoveredNameOffset=0x{:X}\n", off));
+        } else {
+            dump.push_str("DiscoveredNameOffset=<none>\n");
+        }
+        if let Some(off) = info.discovered_id_offset {
+            dump.push_str(&format!("DiscoveredIdOffset=0x{:X}\n", off));
+        } else {
+            dump.push_str("DiscoveredIdOffset=<none>\n");
+        }
+        dump.push_str("offset,dec,hex,bits,possible_hash\n");
         for row in &info.rows {
             dump.push_str(&format!(
-                "0x{:X},{},0x{:08X},{}\n",
+                "0x{:X},{},0x{:08X},\"{}\",{}\n",
                 row.offset,
                 row.raw_u32,
                 row.raw_u32,
+                format_set_bits(row.raw_u32),
                 if row.is_hash_candidate { "yes" } else { "no" }
             ));
         }
         if info.subdef_ptr != 0 {
             dump.push_str(&format!("SubdefPtr=0x{:X}\n", info.subdef_ptr));
-            dump.push_str("sub_offset,dec,hex,possible_hash\n");
+            dump.push_str("sub_offset,dec,hex,bits,possible_hash\n");
             for row in &info.subdef_rows {
                 dump.push_str(&format!(
-                    "0x{:X},{},0x{:08X},{}\n",
+                    "0x{:X},{},0x{:08X},\"{}\",{}\n",
                     row.offset,
                     row.raw_u32,
                     row.raw_u32,
+                    format_set_bits(row.raw_u32),
                     if row.is_hash_candidate { "yes" } else { "no" }
                 ));
             }
@@ -1641,12 +1667,13 @@ fn render_debug_probe_tab(ui: &Ui) {
     if !subdef_mode {
         if let Some(_t) = ui.begin_table_with_flags(
             "##debug_probe_offsets_table",
-            4,
+            5,
             TableFlags::BORDERS_INNER_V | TableFlags::ROW_BG | TableFlags::RESIZABLE,
         ) {
             ui.table_setup_column("Offset");
             ui.table_setup_column("Raw (dec)");
             ui.table_setup_column("Raw (hex)");
+            ui.table_setup_column("Bits");
             ui.table_setup_column("Possible Hash");
             ui.table_headers_row();
 
@@ -1678,6 +1705,8 @@ fn render_debug_probe_tab(ui: &Ui) {
                     ui.text(format!("0x{:08X}", row.raw_u32));
                 }
                 ui.table_next_column();
+                ui.text(format_set_bits(row.raw_u32));
+                ui.table_next_column();
                 if row.is_hash_candidate {
                     ui.text_colored([0.45, 0.90, 0.55, 1.0], "Yes");
                 } else {
@@ -1697,12 +1726,13 @@ fn render_debug_probe_tab(ui: &Ui) {
         ui.text(format!("Subdef Ptr: 0x{:X}", info.subdef_ptr));
         if let Some(_t) = ui.begin_table_with_flags(
             "##debug_probe_subdef_offsets_table",
-            4,
+            5,
             TableFlags::BORDERS_INNER_V | TableFlags::ROW_BG | TableFlags::RESIZABLE,
         ) {
             ui.table_setup_column("Subdef+Off");
             ui.table_setup_column("Raw (dec)");
             ui.table_setup_column("Raw (hex)");
+            ui.table_setup_column("Bits");
             ui.table_setup_column("Possible Hash");
             ui.table_headers_row();
 
@@ -1733,6 +1763,8 @@ fn render_debug_probe_tab(ui: &Ui) {
                 } else {
                     ui.text(format!("0x{:08X}", row.raw_u32));
                 }
+                ui.table_next_column();
+                ui.text(format_set_bits(row.raw_u32));
                 ui.table_next_column();
                 if row.is_hash_candidate {
                     ui.text_colored([0.45, 0.90, 0.55, 1.0], "Yes");
