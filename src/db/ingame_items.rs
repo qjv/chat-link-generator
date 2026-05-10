@@ -4815,13 +4815,11 @@ unsafe fn decode_text_hash(state: &State, text_hash: u32, prop_ctx: *const u8) -
         if coded.is_null() {
             continue;
         }
-        if let Some(text) = read_clean_coded_text(coded) {
+        if let Some(text) = decode_coded_text(state.pointers.decode_text_fn, coded) {
             return Some(text);
         }
-        if DIRECT_DECODE_FALLBACK_ENABLED {
-            if let Some(text) = decode_coded_text(state.pointers.decode_text_fn, coded) {
-                return Some(text);
-            }
+        if let Some(text) = read_clean_coded_text(coded) {
+            return Some(text);
         }
     }
     None
@@ -4915,25 +4913,20 @@ unsafe fn decode_text_hash_with_pointers(
     let resolve: ResolveTextHashFn = std::mem::transmute(pointers.resolve_text_hash_fn);
     let run_resolve = || resolve(text_hash, 0);
     for _ in 0..TEXT_HASH_RESOLVE_ATTEMPTS {
-        let coded = with_text_parser_assert_suppressed(|| {
-            if !pointers.prop_ctx_getter.is_null() {
-                with_prop_ctx_installed(pointers.prop_ctx_getter, prop_ctx, run_resolve)
-                    .unwrap_or(std::ptr::null())
-            } else {
-                run_resolve()
-            }
-        })
-        .unwrap_or(std::ptr::null());
+        let coded = if !pointers.prop_ctx_getter.is_null() {
+            with_prop_ctx_installed(pointers.prop_ctx_getter, prop_ctx, run_resolve)
+                .unwrap_or(std::ptr::null())
+        } else {
+            run_resolve()
+        };
         if coded.is_null() {
             continue;
         }
-        if let Some(text) = read_clean_coded_text(coded) {
+        if let Some(text) = decode_coded_text(pointers.decode_text_fn, coded) {
             return Some(text);
         }
-        if DIRECT_DECODE_FALLBACK_ENABLED {
-            if let Some(text) = decode_coded_text(pointers.decode_text_fn, coded) {
-                return Some(text);
-            }
+        if let Some(text) = read_clean_coded_text(coded) {
+            return Some(text);
         }
     }
     None
@@ -4975,15 +4968,8 @@ unsafe fn decode_coded_text(decode_text_fn: *mut u8, coded: *const u16) -> Optio
 
     let mut out = None;
     let out_ptr = &mut out as *mut Option<String> as *mut core::ffi::c_void;
-    let ran = with_text_parser_assert_suppressed(|| {
-        decode(coded, receiver, out_ptr);
-    })
-    .is_some();
-    if ran {
-        out
-    } else {
-        None
-    }
+    decode(coded, receiver, out_ptr);
+    out
 }
 
 unsafe fn resolve_coded_text_ptr(state: &State, text_hash: u32, prop_ctx: *const u8) -> *const u16 {
@@ -5001,15 +4987,12 @@ unsafe fn resolve_coded_text_ptr(state: &State, text_hash: u32, prop_ctx: *const
     type ResolveTextHashFn = unsafe extern "C" fn(u32, u32) -> *const u16;
     let resolve: ResolveTextHashFn = std::mem::transmute(state.pointers.resolve_text_hash_fn);
     let run_resolve = || resolve(text_hash, 0);
-    with_text_parser_assert_suppressed(|| {
-        if !state.pointers.prop_ctx_getter.is_null() {
-            with_prop_ctx_installed(state.pointers.prop_ctx_getter, prop_ctx, run_resolve)
-                .unwrap_or(std::ptr::null())
-        } else {
-            run_resolve()
-        }
-    })
-    .unwrap_or(std::ptr::null())
+    if !state.pointers.prop_ctx_getter.is_null() {
+        with_prop_ctx_installed(state.pointers.prop_ctx_getter, prop_ctx, run_resolve)
+            .unwrap_or(std::ptr::null())
+    } else {
+        run_resolve()
+    }
 }
 
 unsafe fn wide_string_len_checked(ptr: *const u16, max_len: usize) -> Option<usize> {
