@@ -1,0 +1,188 @@
+GW2 Legendary Armory Mapping Patterns
+=====================================
+
+Goal 1) List every equipment where I can select stats/rune/sigil/infusion (legendary-ready)
+-------------------------------------------------------------------------------------------
+
+A. String search patterns (Ghidra list_strings filter)
+- "LegendaryArmory"
+- "InvLegendaryArmorySlot"
+- "Selectable"
+- "selectable stats"
+- "prefix"
+- "secondary suffix"
+- "rune"
+- "sigil"
+- "infusion"
+- "upgrade component"
+- "item modifier"
+- "itemstats"
+- "armor rune"
+- "weapon sigil"
+- "relic"
+
+B. Function-name patterns (search_functions_by_name)
+- "gw2_ChCliLegendaryArmoryMgr_"
+- "gw2_InvLegendaryArmorySlot_"
+- "gw2_ChCliInventory_"
+- "gw2_ChCliItemStorage"
+- "CanUse"
+- "IsEligible"
+- "GetSelectable"
+- "GetAvailable"
+- "GetCompatible"
+- "ApplyStats"
+- "ApplyUpgrade"
+
+C. Data signals to capture per item (normalized output)
+- item_id
+- skin_id
+- equipment_type (weapon/armor/trinket/aquabreather/backpack)
+- rarity
+- is_legendary
+- has_selectable_stats
+- can_slot_rune
+- can_slot_sigil_1
+- can_slot_sigil_2
+- can_slot_infusion_1
+- can_slot_infusion_2
+- can_slot_relic
+- unlocked_count
+- in_use_count
+
+D. Extraction rule
+- Keep only records where:
+  is_legendary == true
+  AND (has_selectable_stats OR can_slot_rune OR can_slot_sigil_1 OR can_slot_sigil_2 OR can_slot_infusion_1 OR can_slot_infusion_2 OR can_slot_relic)
+
+
+Goal 2) List what can be put into each slot
+-------------------------------------------
+
+A. Slot universe (target model)
+- ARMOR: helm, shoulders, coat, gloves, leggings, boots
+- WEAPON SET A: mainhand_a, offhand_a, twohand_a
+- WEAPON SET B: mainhand_b, offhand_b, twohand_b
+- AQUATIC: aquabreather, underwater_weapon_1, underwater_weapon_2
+- TRINKETS: amulet, ring_1, ring_2, accessory_1, accessory_2, back
+- RELIC: relic
+
+B. Compatibility keys
+- profession
+- elite_spec
+- slot_type
+- weapon_hand (main/off/two-hand)
+- weapon_family (sword/axe/staff/etc.)
+- armor_weight (light/medium/heavy)
+- mode (land/aquatic)
+- required_level
+
+C. Per-slot allowed payload
+- allowed_item_types[]
+- allowed_stat_sets[]
+- allowed_runes[]
+- allowed_sigils_mainhand[]
+- allowed_sigils_offhand[]
+- allowed_infusions[]
+- allowed_relics[]
+- blocked_reason (if not usable)
+
+D. Function patterns likely containing compatibility logic
+- "CanEquip"
+- "CanPlaceInSlot"
+- "ValidateEquipment"
+- "GetCompatibleSlots"
+- "GetValidUpgrades"
+- "GetRuneCandidates"
+- "GetSigilCandidates"
+- "GetInfusionCandidates"
+- "GetRelicCandidates"
+
+
+Goal 3) Preset system (one-click legendary build template)
+----------------------------------------------------------
+
+A. Preset schema (save/apply)
+- preset_id
+- name
+- profession
+- specialization_lines[3]
+- selected_traits[9]
+- skills { heal, utility_1, utility_2, utility_3, elite }
+- relic_id
+- equipment:
+  - each slot -> { item_id, stat_set_id, rune_id/sigil_ids, infusion_ids, skin_id, dyes[] }
+- optional: legends, pet, jadebot, novelties
+
+B. One-click apply pipeline
+1. Validate context
+   - character loaded
+   - profession matches (or allow override with warning)
+   - all required legendary items unlocked or fallback exists
+2. Compute diff
+   - current_loadout vs preset_loadout
+3. Apply in safe order
+   - weapon/armor/trinkets
+   - stat sets
+   - runes/sigils/infusions/relic
+   - traits/specializations
+   - skills
+4. Verify
+   - re-read loadout and compare expected
+5. Notify
+   - success report + partial failures with per-slot reason
+
+C. Apply function search patterns
+- "ApplyPreset"
+- "ApplyBuild"
+- "SetEquipment"
+- "SetItemStats"
+- "SetRune"
+- "SetSigil"
+- "SetInfusion"
+- "SetRelic"
+- "CommitLoadout"
+- "BroadcastLoadoutChanged"
+
+D. Failure classes to map
+- item_not_unlocked
+- slot_incompatible
+- stat_unavailable
+- upgrade_unavailable
+- duplicate_conflict (ring/accessory uniqueness rules)
+- profession_restriction
+- in_combat_or_locked_state
+
+
+Practical Ghidra workflow (repeatable)
+-------------------------------------
+1. list_strings(filter="LegendaryArmory")
+2. get_xrefs_to(string_address)
+3. decompile_function_by_address(xref_function)
+4. rename_function_by_address("gw2_...") using behavior
+5. Build tables:
+   - legendary_items.tsv
+   - slot_compatibility.tsv
+   - preset_apply_flow.tsv
+
+
+Output table templates
+----------------------
+
+A. legendary_items.tsv
+item_id\tequip_type\tslot_family\tlegendary\tselectable_stats\trune\tsigil1\tsigil2\tinfusion1\tinfusion2\trelic\tunlocked\tin_use
+
+B. slot_compatibility.tsv
+slot\tprofession\tallowed_item_types\tallowed_stat_sets\tallowed_runes\tallowed_sigils\tallowed_infusions\tallowed_relics\tnotes
+
+C. preset_apply_flow.tsv
+step\toperation\tfunction\tinput\toutput\tfailure_codes
+
+
+Naming schema to keep consistent
+--------------------------------
+- gw2_ChCliLegendaryArmoryMgr_*   (backend/state/unlock/in-use counters)
+- gw2_InvLegendaryArmorySlot_*    (UI slot interactions and validation)
+- gw2_ChCliInventory_*            (item ownership, bag/storage movement, upgrades)
+- gw2_HeroDialog_*                (character panel/build/equipment tab behavior)
+

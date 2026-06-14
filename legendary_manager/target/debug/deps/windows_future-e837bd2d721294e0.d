@@ -1,0 +1,10 @@
+/run/media/tulio/ssd/GW2 Stuff/git/chat-link-generator/legendary_manager/target/debug/deps/windows_future-e837bd2d721294e0.d: /home/tulio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/windows-future-0.2.1/src/lib.rs /home/tulio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/windows-future-0.2.1/src/bindings.rs /home/tulio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/windows-future-0.2.1/src/bindings_impl.rs /home/tulio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/windows-future-0.2.1/src/get.rs /home/tulio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/windows-future-0.2.1/src/waiter.rs /home/tulio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/windows-future-0.2.1/src/../readme.md
+
+/run/media/tulio/ssd/GW2 Stuff/git/chat-link-generator/legendary_manager/target/debug/deps/libwindows_future-e837bd2d721294e0.rmeta: /home/tulio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/windows-future-0.2.1/src/lib.rs /home/tulio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/windows-future-0.2.1/src/bindings.rs /home/tulio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/windows-future-0.2.1/src/bindings_impl.rs /home/tulio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/windows-future-0.2.1/src/get.rs /home/tulio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/windows-future-0.2.1/src/waiter.rs /home/tulio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/windows-future-0.2.1/src/../readme.md
+
+/home/tulio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/windows-future-0.2.1/src/lib.rs:
+/home/tulio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/windows-future-0.2.1/src/bindings.rs:
+/home/tulio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/windows-future-0.2.1/src/bindings_impl.rs:
+/home/tulio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/windows-future-0.2.1/src/get.rs:
+/home/tulio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/windows-future-0.2.1/src/waiter.rs:
+/home/tulio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/windows-future-0.2.1/src/../readme.md:

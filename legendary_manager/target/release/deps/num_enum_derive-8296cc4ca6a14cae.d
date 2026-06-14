@@ -1,0 +1,9 @@
+/run/media/tulio/ssd/GW2 Stuff/git/chat-link-generator/legendary_manager/target/release/deps/num_enum_derive-8296cc4ca6a14cae.d: /home/tulio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/num_enum_derive-0.7.6/src/lib.rs /home/tulio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/num_enum_derive-0.7.6/src/enum_attributes.rs /home/tulio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/num_enum_derive-0.7.6/src/parsing.rs /home/tulio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/num_enum_derive-0.7.6/src/utils.rs /home/tulio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/num_enum_derive-0.7.6/src/variant_attributes.rs
+
+/run/media/tulio/ssd/GW2 Stuff/git/chat-link-generator/legendary_manager/target/release/deps/libnum_enum_derive-8296cc4ca6a14cae.so: /home/tulio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/num_enum_derive-0.7.6/src/lib.rs /home/tulio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/num_enum_derive-0.7.6/src/enum_attributes.rs /home/tulio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/num_enum_derive-0.7.6/src/parsing.rs /home/tulio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/num_enum_derive-0.7.6/src/utils.rs /home/tulio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/num_enum_derive-0.7.6/src/variant_attributes.rs
+
+/home/tulio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/num_enum_derive-0.7.6/src/lib.rs:
+/home/tulio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/num_enum_derive-0.7.6/src/enum_attributes.rs:
+/home/tulio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/num_enum_derive-0.7.6/src/parsing.rs:
+/home/tulio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/num_enum_derive-0.7.6/src/utils.rs:
+/home/tulio/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/num_enum_derive-0.7.6/src/variant_attributes.rs:

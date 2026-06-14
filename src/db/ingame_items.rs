@@ -41,6 +41,7 @@ const ITEM_UPGRADE_TEXT_HASH1: usize = 0x60;
 const ITEM_UPGRADE_TEXT_HASH2: usize = 0x70;
 // Not present in GW2RE's ItemUpgrade_t; keep as a guarded fallback only.
 const ITEM_UPGRADE_BASE_ITEM_ID: usize = 0xA0;
+const ENABLE_EXPERIMENTAL_BASE_UPGRADE_LINK: bool = false;
 const CONTENT_DEF_TYPE: usize = 0x10;
 const CONTENT_DEF_INDEX: usize = 0x14;
 const POI_DEF_ID: usize = 0x28;
@@ -91,7 +92,6 @@ const DIRECT_DECODE_FALLBACK_ENABLED: bool = false;
 const SAFE_SKIP_NON_API_ITEM_DECODE: bool = true;
 const DEBUG_DECODE_ATTEMPTS: usize = 8;
 const DEBUG_DECODE_RETRY_WAIT_MS: u64 = 4;
-const DEBUG_AVOID_DECODETEXT_CALL: bool = true;
 const MAX_TEXT_HASH_VALUE: u32 = 0x0100_0000;
 const GAME_TEXT_RESOLVE_ENABLED: bool = true;
 
@@ -1930,11 +1930,7 @@ pub fn tick() {
 
             let mut iter_index = job.current_id;
             let item_ptr = unsafe {
-                iterate_content_defs(
-                    content_ctx,
-                    ITEM_CONTENT_TYPE,
-                    &mut iter_index as *mut u32,
-                )
+                iterate_content_defs(content_ctx, ITEM_CONTENT_TYPE, &mut iter_index as *mut u32)
             };
 
             job.current_id = iter_index;
@@ -2087,12 +2083,7 @@ pub fn tick() {
                         .unwrap_or(0);
                     if fallback_skin_id == 0 || fallback_base_upgrade == 0 {
                         unsafe {
-                            refresh_item_fallback_ids(
-                                &mut s,
-                                id,
-                                content_ctx,
-                                get_content_by_index,
-                            )
+                            refresh_item_fallback_ids(&mut s, id, content_ctx, get_content_by_index)
                         };
                     }
                 }
@@ -2484,14 +2475,6 @@ pub fn tick() {
             let decoded = if name_hash != 0 {
                 if let Some(cached) = s.decoded_text_by_hash.get(&name_hash).cloned() {
                     Some(cached)
-                } else if job.link_type == encoder::LinkType::Wardrobe {
-                    let out = unsafe { resolve_text_hash_coded_only(&s, name_hash, prop_ctx) };
-                    if let Some(ref text) = out {
-                        if !text.trim().is_empty() && !is_unresolved_decoded_text(text) {
-                            s.decoded_text_by_hash.insert(name_hash, text.clone());
-                        }
-                    }
-                    out
                 } else {
                     let out = unsafe { decode_text_hash_queued(&mut s, name_hash, prop_ctx) };
                     if let Some(ref text) = out {
@@ -3200,8 +3183,8 @@ unsafe fn decode_text_hash_decoded_first(
         return None;
     }
 
-    // Prefer true decoded text. Interpreting coded text directly can yield garbage like "宽".
-    decode_coded_text(state.pointers.decode_text_fn, coded).or_else(|| read_clean_coded_text(coded))
+    // Prefer true decoded text only. Interpreting coded text directly can yield garbage.
+    decode_coded_text(state.pointers.decode_text_fn, coded)
 }
 
 pub fn search(query: &str, only_api: bool, max_results: usize) -> Vec<SearchResult> {
@@ -4127,6 +4110,9 @@ fn sanitize_base_upgrade_item_id(state: &State, candidate: u32) -> u32 {
 }
 
 unsafe fn read_item_base_upgrade_item_id(item_ptr: *const u8) -> u32 {
+    if !ENABLE_EXPERIMENTAL_BASE_UPGRADE_LINK {
+        return 0;
+    }
     let Some(subdef_ptr) = read_ptr(item_ptr, ITEM_DEF_SUBDEF) else {
         return 0;
     };
@@ -4615,6 +4601,14 @@ unsafe fn resolve_text_hash_coded_only(
     if !is_plausible_text_hash(text_hash) {
         return None;
     }
+    // Prefer real decoded text first. Directly reading coded text can produce
+    // glyph garbage for unresolved formatting opcodes.
+    if let Some(decoded) = decode_text_hash_decoded_first(state, text_hash, prop_ctx) {
+        let cleaned = decoded.trim().to_string();
+        if !cleaned.is_empty() && !is_unresolved_decoded_text(&cleaned) {
+            return Some(cleaned);
+        }
+    }
     for _ in 0..TEXT_HASH_RESOLVE_ATTEMPTS {
         let coded_ptr = resolve_coded_text_ptr(state, text_hash, prop_ctx);
         if coded_ptr.is_null() {
@@ -4818,9 +4812,6 @@ unsafe fn decode_text_hash(state: &State, text_hash: u32, prop_ctx: *const u8) -
         if let Some(text) = decode_coded_text(state.pointers.decode_text_fn, coded) {
             return Some(text);
         }
-        if let Some(text) = read_clean_coded_text(coded) {
-            return Some(text);
-        }
     }
     None
 }
@@ -4873,8 +4864,9 @@ unsafe fn process_decode_queue(state: &mut State, prop_ctx: *const u8, max_per_t
         if state.decoded_text_by_hash.contains_key(&text_hash) {
             continue;
         }
-        let out = decode_text_hash(state, text_hash, prop_ctx)
-            .or_else(|| resolve_text_hash_coded_only(state, text_hash, prop_ctx));
+        // Queue decode is part of authoritative parsing; avoid coded-text fallback
+        // here to prevent persisting partially decoded garbage names.
+        let out = decode_text_hash(state, text_hash, prop_ctx);
         let mut accepted = false;
         if let Some(text) = out {
             if !text.trim().is_empty() && !is_unresolved_decoded_text(&text) {
@@ -4925,9 +4917,6 @@ unsafe fn decode_text_hash_with_pointers(
         if let Some(text) = decode_coded_text(pointers.decode_text_fn, coded) {
             return Some(text);
         }
-        if let Some(text) = read_clean_coded_text(coded) {
-            return Some(text);
-        }
     }
     None
 }
@@ -4968,7 +4957,7 @@ unsafe fn decode_coded_text(decode_text_fn: *mut u8, coded: *const u16) -> Optio
 
     let mut out = None;
     let out_ptr = &mut out as *mut Option<String> as *mut core::ffi::c_void;
-    decode(coded, receiver, out_ptr);
+    let _ = with_text_parser_assert_suppressed(|| decode(coded, receiver, out_ptr));
     out
 }
 

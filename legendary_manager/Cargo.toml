@@ -1,0 +1,23 @@
+[package]
+name = "legendary_manager"
+version = "0.1.0"
+edition = "2021"
+description = "GW2 legendary equipment manager addon"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+nexus = { git = "https://github.com/zerthox/nexus-rs", rev = "ddd5d46", features = [] }
+memtools = { path = "../../memtools-rs" }
+once_cell = "1.19"
+parking_lot = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_System_Memory",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+] }

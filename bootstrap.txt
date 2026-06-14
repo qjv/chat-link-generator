@@ -1,0 +1,43 @@
+GW2 Ghidra MCP Bootstrap
+========================
+
+Goal
+----
+Enable full function mapping from string anchors ("D:/Perforce..." and asserts) by using incoming xrefs.
+
+What must be available
+----------------------
+- MCP tool: get_xrefs_to
+- MCP tool: list_strings
+
+Current blocker summary
+-----------------------
+- This session only exposed get_xrefs_from.
+- get_xrefs_from on string addresses returns "(no xrefs found)" (expected; strings rarely have outgoing refs).
+- Full mapping needs incoming references to string addresses (get_xrefs_to).
+
+Config already updated
+----------------------
+- File: /home/tulio/.codex/config.toml
+- Added several ghidra tools including get_xrefs_to.
+
+Next-session checklist
+----------------------
+1) Start a NEW Codex chat/session (not just reload).
+2) Ensure Ghidra is running with GhidraMCP plugin HTTP server on 127.0.0.1:8080.
+3) In first message, ask:
+   "Call get_xrefs_to on 0x141916238 and show result."
+4) If tool is exposed and returns refs, continue:
+   - Page all strings filtered by:
+     - "Perforce"
+     - "assert" / "Assertion"
+   - For each string address, call get_xrefs_to.
+   - Build map:
+     function_address -> module/source hint -> proposed function name -> confidence.
+
+If get_xrefs_to is still missing
+--------------------------------
+- Confirm the active MCP server in use is "ghidra" from:
+  /home/tulio/.codex/config.toml
+- Start another fresh chat after confirming.
+
