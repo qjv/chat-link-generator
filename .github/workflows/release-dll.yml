@@ -1,0 +1,75 @@
+name: Build DLLs
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: chat-link-generator
+            manifest: Cargo.toml
+            artifact: chat-link-generator-windows-x64
+          - id: legendary-manager
+            manifest: legendary_manager/Cargo.toml
+            artifact: legendary-manager-windows-x64
+          - id: legendary-preset-addon
+            manifest: legendary_preset_addon/Cargo.toml
+            artifact: legendary-preset-addon-windows-x64
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v6
+        with:
+          path: project
+
+      - name: Checkout memtools-rs
+        uses: actions/checkout@v6
+        with:
+          repository: qjv/memtools-rs
+          path: memtools-rs
+          token: ${{ secrets.GH_PAT || github.token }}
+
+      - name: Install Rust target
+        run: rustup target add x86_64-pc-windows-msvc
+
+      - name: Build release DLL
+        working-directory: project
+        run: cargo build --release --target x86_64-pc-windows-msvc --target-dir target/${{ matrix.id }} --manifest-path ${{ matrix.manifest }}
+
+      - name: Collect DLL
+        working-directory: project
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/${{ matrix.id }} | Out-Null
+          Copy-Item target/${{ matrix.id }}/x86_64-pc-windows-msvc/release/*.dll dist/${{ matrix.id }}/
+
+      - name: Upload DLL artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: project/dist/${{ matrix.id }}/*.dll
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        working-directory: project
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag dist/${{ matrix.id }}/*.dll --clobber
+          } else {
+            gh release create $tag dist/${{ matrix.id }}/*.dll --generate-notes
+          }
